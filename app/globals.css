@@ -2527,6 +2527,49 @@ code {
 
 /* --- Responsive Overhaul --- */
 
+/* --- Staking Dashboard --- */
+.staking-page { gap: 28px; }
+.staking-hero {
+  display: grid;
+  grid-template-columns: minmax(0, 1.5fr) minmax(260px, .7fr);
+  gap: 48px;
+  align-items: center;
+  overflow: hidden;
+  background: radial-gradient(circle at 85% 20%, rgba(245, 200, 66, .12), transparent 34%), var(--panel);
+}
+.staking-hero h1 { margin: 8px 0 12px; font-size: clamp(2.4rem, 5vw, 4.7rem); line-height: .98; letter-spacing: -.055em; }
+.staking-hero-stat { display: flex; min-height: 150px; flex-direction: column; justify-content: center; gap: 9px; }
+.staking-hero-stat strong { color: var(--yellow-primary); font-size: clamp(1.6rem, 3vw, 2.5rem); }
+.staking-overview { display: grid; grid-template-columns: repeat(3, 1fr); gap: 18px; }
+.staking-workspace { display: grid; grid-template-columns: minmax(280px, .7fr) minmax(0, 1.3fr); gap: 18px; }
+.staking-controls { display: flex; flex-direction: column; gap: 30px; }
+.staking-field { display: grid; gap: 14px; }
+.staking-field > span { display: flex; justify-content: space-between; gap: 20px; font-size: .88rem; }
+.staking-field output { color: var(--yellow-primary); font-weight: 800; }
+.staking-field input[type="range"] { width: 100%; accent-color: var(--yellow-primary); cursor: pointer; }
+.staking-toggle { display: flex; align-items: center; gap: 12px; font-weight: 700; cursor: pointer; }
+.staking-toggle input { position: absolute; opacity: 0; }
+.staking-toggle span { width: 42px; height: 24px; border-radius: 999px; background: var(--panel-soft); border: 1px solid var(--border); position: relative; transition: .2s ease; }
+.staking-toggle span::after { content: ""; position: absolute; width: 16px; height: 16px; left: 3px; top: 3px; border-radius: 50%; background: var(--muted); transition: .2s ease; }
+.staking-toggle input:checked + span { background: rgba(245, 200, 66, .18); border-color: rgba(245, 200, 66, .55); }
+.staking-toggle input:checked + span::after { transform: translateX(18px); background: var(--yellow-primary); }
+.staking-toggle input:focus-visible + span { outline: 2px solid var(--accent); outline-offset: 3px; }
+.staking-projection { display: flex; flex-direction: column; gap: 28px; }
+.staking-chart { height: 290px; display: grid; grid-template-columns: repeat(13, 1fr); align-items: end; gap: 7px; padding: 28px 6px 0; border-bottom: 1px solid var(--border); background: repeating-linear-gradient(to bottom, transparent 0, transparent 71px, rgba(255,255,255,.045) 72px); }
+.staking-bar-column { height: 100%; min-width: 0; display: flex; flex-direction: column; justify-content: flex-end; align-items: center; gap: 8px; }
+.staking-bar { width: 100%; max-width: 28px; min-height: 4px; border-radius: 5px 5px 1px 1px; background: linear-gradient(180deg, var(--yellow-primary), rgba(245, 200, 66, .25)); box-shadow: 0 0 18px rgba(245, 200, 66, .08); }
+.staking-bar-column span { color: var(--muted); font-size: .68rem; height: 18px; }
+.staking-result-row { display: grid; grid-template-columns: repeat(2, 1fr); gap: 18px; }
+.staking-result-row div { display: grid; gap: 7px; }
+.staking-result-row span { color: var(--muted); font-size: .78rem; text-transform: uppercase; letter-spacing: .08em; }
+.staking-result-row strong { font-size: 1.45rem; }
+.staking-accent { color: var(--green); }
+.staking-notes { display: grid; grid-template-columns: repeat(3, 1fr); gap: 36px; }
+.staking-notes h3 { margin: 14px 0 8px; font-size: 1rem; }
+.staking-notes p { margin: 0; color: var(--muted); font-size: .88rem; line-height: 1.6; }
+.staking-note-icon { color: var(--yellow-primary); font-size: .72rem; font-weight: 900; letter-spacing: .12em; }
+.staking-disclaimer { text-align: center; }
+
 @media (max-width: 1200px) {
   .section-grid, 
   .hero-support-grid, 
@@ -2535,6 +2578,7 @@ code {
   .calculator-layout {
     grid-template-columns: 1fr;
   }
+  .staking-workspace { grid-template-columns: 1fr; }
   
   .explorer-toolbar {
     grid-template-columns: 1fr;
@@ -2561,6 +2605,8 @@ code {
   .network-coverage-grid {
     grid-template-columns: 1fr;
   }
+  .staking-overview, .staking-notes { grid-template-columns: 1fr; }
+  .staking-hero { grid-template-columns: 1fr; }
 }
 
 @media (max-width: 768px) {
@@ -2744,4 +2790,6 @@ code {
   .demand-signal-foot {
     justify-content: flex-start;
   }
+  .staking-chart { gap: 3px; height: 230px; }
+  .staking-result-row { grid-template-columns: 1fr; }
 }

@@ -33,13 +33,22 @@ atomic_switch() {
 }
 
 load_runtime_env() {
+  # shellcheck disable=SC1090
+  . "$ENV_FILE"
+}
+
+export_runtime_env() {
   set -a
   # shellcheck disable=SC1090
   . "$ENV_FILE"
   set +a
 }
 
-for cmd in git node npm pm2 rsync curl readlink python3; do
+make_writable() {
+  [[ -d "$1" ]] && chmod -R u+w "$1" || true
+}
+
+for cmd in git node npm pm2 rsync curl readlink realpath python3; do
   require_command "$cmd"
 done
 
@@ -63,10 +72,16 @@ load_runtime_env
 [[ "$POCKET_SQLITE_PATH" != "$RELEASES_DIR"/* ]] || fail "POCKET_SQLITE_PATH must be outside releases"
 [[ -f "$POCKET_SQLITE_PATH" ]] || fail "canonical SQLite database is missing"
 [[ -r "$POCKET_SQLITE_PATH" ]] || fail "canonical SQLite database is not readable"
+db_realpath="$(realpath -e "$POCKET_SQLITE_PATH")"
+releases_realpath="$(realpath -m "$RELEASES_DIR")"
+[[ "$db_realpath" != "$releases_realpath"/* ]] || fail "canonical SQLite database resolves inside releases"
 
 POCKET_BACKUP_DIR="${POCKET_BACKUP_DIR:-/var/backups/pocket-dashboard}"
-export POCKET_BACKUP_DIR
 [[ -d "$POCKET_BACKUP_DIR" && -w "$POCKET_BACKUP_DIR" ]] || fail "backup directory is not writable"
+backup_realpath="$(realpath -e "$POCKET_BACKUP_DIR")"
+[[ "$backup_realpath" != "$releases_realpath"/* ]] || fail "backup directory resolves inside releases"
+env_realpath="$(realpath -e "$ENV_FILE")"
+[[ "$env_realpath" != "$releases_realpath"/* ]] || fail "environment file resolves inside releases"
 
 mkdir -p "$RELEASES_DIR" "$SHARED_DIR"
 
@@ -94,12 +109,13 @@ rollback() {
   if (( activated == 1 )); then
     log "deployment failed after activation; rolling back to $(basename "$previous_release")"
     atomic_switch "$previous_release"
-    load_runtime_env
+    export_runtime_env
     pm2 startOrReload "$CURRENT_LINK/ecosystem.config.cjs" --update-env || true
     pm2 save || true
   fi
 
   if [[ -d "$release_dir" && "$release_dir" != "$previous_release" ]]; then
+    make_writable "$release_dir"
     rm -rf "$release_dir" || true
   fi
 
@@ -122,7 +138,6 @@ rsync -a --delete \
   --exclude='data/' \
   --exclude='.env*' \
   "$SOURCE_ROOT/" "$release_dir/"
-ln -s "$ENV_FILE" "$release_dir/.env.production"
 
 cd "$release_dir"
 log "installing dependencies"
@@ -132,30 +147,39 @@ log "running typecheck"
 NODE_ENV=production POCKET_DB_READONLY=true npm run typecheck
 
 log "building Next.js application read-only"
-NODE_ENV=production POCKET_DB_READONLY=true npm run build
+NODE_ENV=production POCKET_DB_READONLY=true POCKET_SQLITE_PATH="$POCKET_SQLITE_PATH" npm run build
+
+ln -s "$ENV_FILE" "$release_dir/.env.production"
 
 log "creating and verifying online SQLite backup"
+export POCKET_SQLITE_PATH POCKET_BACKUP_DIR
 python3 "$release_dir/scripts/backup.py" \
   --db "$POCKET_SQLITE_PATH" \
   --backup-dir "$POCKET_BACKUP_DIR" \
   --retention 7
 
 log "activating release $release_id"
+chmod -R a-w "$release_dir"
 atomic_switch "$release_dir"
 activated=1
 
-load_runtime_env
+export_runtime_env
 export DEPLOY_ROOT
 log "reloading PM2 web and indexer"
 pm2 startOrReload "$CURRENT_LINK/ecosystem.config.cjs" --update-env
 
 log "verifying web and indexer"
 healthy=0
+health_before="$(curl --fail --silent --show-error --max-time 5 "$HEALTH_URL")"
+indexer_restarts_before="$(pm2 jlist | node -e 'let s=""; process.stdin.on("data", d => s += d).on("end", () => { const a=JSON.parse(s).find(x => x.name === "pocket-indexer"); process.stdout.write(String(a?.pm2_env?.restart_time ?? -1)); });')"
 for _ in $(seq 1 30); do
-  if curl --fail --silent --show-error --max-time 5 "$HEALTH_URL" >/dev/null \
+  health_after="$(curl --fail --silent --show-error --max-time 5 "$HEALTH_URL")" || health_after=""
+  if [[ -n "$health_after" ]] \
     && curl --fail --silent --show-error --max-time 5 http://127.0.0.1:3100/ >/dev/null \
     && [[ -n "$(pm2 pid pocket-dashboard)" ]] \
-    && [[ -n "$(pm2 pid pocket-indexer)" ]]; then
+    && [[ -n "$(pm2 pid pocket-indexer)" ]] \
+    && HEALTH="$health_after" node -e 'const h=JSON.parse(process.env.HEALTH); const i=h.indexer; if (!i || i.isLocked !== true || !Number.isFinite(Number(i.highestIngestedHeight)) || !Number.isFinite(Number(i.contiguousHeight))) process.exit(1);' \
+    && [[ "$(pm2 jlist | node -e 'let s=""; process.stdin.on("data", d => s += d).on("end", () => { const a=JSON.parse(s).find(x => x.name === "pocket-indexer"); process.stdout.write(String(a?.pm2_env?.restart_time ?? -1)); });')" == "$indexer_restarts_before" ]]; then
     healthy=1
     break
   fi
@@ -163,6 +187,7 @@ for _ in $(seq 1 30); do
 done
 
 (( healthy == 1 )) || fail "web/indexer health verification failed"
+log "indexer health verified; before=${health_before} after=${health_after}"
 [[ "$(readlink -f "$CURRENT_LINK")" == "$release_dir" ]] || fail "current does not point to deployed SHA"
 
 pm2 save
@@ -178,6 +203,7 @@ if (( ${#all_releases[@]} > KEEP_RELEASES )); then
   for (( i=KEEP_RELEASES; i<${#all_releases[@]}; i++ )); do
     old_release="${all_releases[$i]}"
     if [[ "$old_release" != "$current_target" && "$old_release" != "$previous_release" ]]; then
+      make_writable "$old_release"
       rm -rf "$old_release"
       log "removed old release $(basename "$old_release")"
     fi

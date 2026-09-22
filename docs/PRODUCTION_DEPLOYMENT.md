@@ -232,3 +232,11 @@ For this reason:
 - review changes to `.github/workflows/deploy-production.yml`, `scripts/deploy-production.sh`, and `ecosystem.config.cjs` as privileged production changes
 
 GitHub's own security guidance notes that self-hosted runners are persistent machines rather than clean ephemeral environments. This repository is private, which is the appropriate starting point, but trusted write access remains important.
+
+## Emergency disable
+
+To stop automatic production activation without deleting application state, disable the production workflow in GitHub Actions or stop the dedicated runner service. Do not delete the `current` pointer, release directories, SQLite database, WAL/SHM files, or backups while disabling deployments.
+
+## Runner replacement
+
+To replace the runner, stop and disable the existing repository-runner service, remove its local runner registration with the runner's `svc.sh`/`config.sh remove` flow, and register the replacement through the repository's **New self-hosted runner** flow. Use a fresh short-lived registration token and never commit or document it. Verify the replacement has the `pocket-provider-production` label before re-enabling production deployments.

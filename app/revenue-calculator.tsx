@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useMemo, useState, useDeferredValue } from "react";
 
 import { formatCompactNumber, formatDecimal, formatInteger, formatUsd, formatUpokt } from "@/lib/format";
 import {
@@ -29,13 +29,14 @@ type RevenueCalculatorProps = {
   sessionStale?: boolean;
 };
 
+const MAX_SUPPLIER_COUNT = 9_999;
 const FREE_SUPPLIER_BUDGET = DEFAULT_NEW_PROVIDER_SUPPLIERS;
 const DEFAULT_SELECTED_CHAIN_COUNT = 10;
 const SESSION_DURATION_MINUTES = 30;
 
 function clampSupplierCount(value: number): number {
   if (!Number.isFinite(value)) return 0;
-  return Math.max(0, Math.min(250, Math.trunc(value)));
+  return Math.max(0, Math.min(MAX_SUPPLIER_COUNT, Math.trunc(value)));
 }
 
 function toUsdFromUpokt(value: bigint, poktPriceUsd: number): number {
@@ -47,7 +48,9 @@ export default function RevenueCalculator({ poktPriceUsd, services, suppliersPer
   const [selectedIds, setSelectedIds] = useState<string[]>(() =>
     services.slice(0, DEFAULT_SELECTED_CHAIN_COUNT).map((service) => service.serviceId)
   );
-  const [supplierCount, setSupplierCount] = useState<number>(FREE_SUPPLIER_BUDGET);
+  const [supplierInput, setSupplierInput] = useState(String(FREE_SUPPLIER_BUDGET));
+  const deferredSupplierInput = useDeferredValue(supplierInput);
+  const supplierCount = Math.max(0, Math.min(MAX_SUPPLIER_COUNT, Math.trunc(Number(deferredSupplierInput) || 0)));
 
   const selectedServices = useMemo(() => {
     const selected = new Set(selectedIds);
@@ -84,7 +87,7 @@ export default function RevenueCalculator({ poktPriceUsd, services, suppliersPer
   }
 
   return (
-    <section className="panel section calculator-section themed section-theme-revenue" style={{ position: 'relative', overflow: 'hidden' }}>
+    <section id="calculator" className="panel section calculator-section themed section-theme-revenue" style={{ position: 'relative', overflow: 'hidden' }}>
       <div style={{ 
         position: 'absolute', 
         bottom: '-10%', 
@@ -127,10 +130,11 @@ export default function RevenueCalculator({ poktPriceUsd, services, suppliersPer
               <input
                 type="number"
                 min={0}
-                max={250}
+                max={MAX_SUPPLIER_COUNT}
                 step={1}
-                value={supplierCount}
-                onChange={(event) => setSupplierCount(clampSupplierCount(Number(event.target.value)))}
+                value={supplierInput}
+                onChange={(e) => setSupplierInput(e.target.value)}
+                onBlur={() => { const n = clampSupplierCount(Number(supplierInput)); setSupplierInput(String(n)); }}
               />
             </label>
           </div>

@@ -304,9 +304,6 @@ export default function DashboardView({ initialWindow, dataByWindow, networkHist
   const servicesByRevenue = [...data.services].sort(compareRevenueDesc);
   const topService = servicesByRevenue[0];
   const cuCoverageComplete = (data.computeUnitCoverage ?? 0) >= 1;
-  const cuDenominator = cuCoverageComplete ? data.totalEstimatedComputeUnits : data.totalRelays;
-  const cuLabel = cuCoverageComplete ? "estimated compute units" : "relays";
-  const revenuePerMillionCU = cuDenominator === 0 ? 0 : (toPoktNumber(data.totalRevenueUpokt) / cuDenominator) * 1_000_000;
   const indexerLag =
     data.indexerTargetHeight != null && data.indexerProcessedHeight != null
       ? Math.max(0, data.indexerTargetHeight - data.indexerProcessedHeight)
@@ -320,9 +317,9 @@ export default function DashboardView({ initialWindow, dataByWindow, networkHist
           <div className="hero-main dashboard-hero-main">
             <div className="hero-copy hero-copy-strong dashboard-hero-copy">
               <span className="eyebrow">Network Analytics</span>
-              <h1>Earn POKT Serving Workload.</h1>
+              <h1>Serve Relays, Earn POKT.</h1>
               <p>
-                Track finalized compute units, rewards, and service concentration through a privacy-safe lens built from indexed settlement events.
+                On-chain data for providers to identify opportunities on Pocket Network.
               </p>
 
               <div className="window-tabs" aria-label="time windows">
@@ -348,9 +345,9 @@ export default function DashboardView({ initialWindow, dataByWindow, networkHist
                   <p>Total rewards distributed in the selected period.</p>
                 </div>
                 <div className="hero-highlight metric-glow-demand">
-                  <span className="hero-highlight-label">{cuCoverageComplete ? "Compute Units" : "Relay Volume"}</span>
-                  <strong className="accent-number">{formatCompactNumber(cuCoverageComplete ? data.totalEstimatedComputeUnits : data.totalRelays)}</strong>
-                  <p>{cuCoverageComplete ? "Estimated compute workload captured in this window." : "Finalized relay demand captured in this window."}</p>
+                  <span className="hero-highlight-label">Estimated USD Value</span>
+                  <strong className="accent-number">{formatUsd(toPoktNumber(data.totalRevenueUpokt) * data.poktPriceUsd, 1)}</strong>
+                  <p>POKT rewards valued at the latest available market price.</p>
                 </div>
               </div>
             </div>
@@ -358,28 +355,29 @@ export default function DashboardView({ initialWindow, dataByWindow, networkHist
             <aside className="hero-side panel-inset network-pulse-card">
               <div className="section-title-row compact-gap">
                 <div>
-                  <span className="eyebrow eyebrow-ghost">Live Pulse</span>
-                  <h2 className="section-title">Network Pulse</h2>
-                  <p className="muted">Key indicators for {formatRelativeRange(window)}.</p>
+                  <span className="eyebrow eyebrow-ghost">Live On-chain Data</span>
+                  <h2 className="section-title">Network Information</h2>
+                  <p className="muted">Integrate your RPC nodes with Pocket Network to maximize your revenues.</p>
                 </div>
                 <span className="pill">{indexerLag == null || indexerLag <= 10 ? "Synced" : "Catching up"}</span>
               </div>
               <div className="network-pulse-grid">
                 <div>
-                  <span>Active Provider Groups</span>
+                  <span title="Privacy-safe provider cohorts inferred from observed domains, owners, and suppliers. This is not a named operator ranking.">Unique Providers</span>
                   <strong>{formatInteger(data.activeProviders)}</strong>
                 </div>
                 <div>
-                  <span>Active Chains</span>
+                  <span>Chains with Activity</span>
                   <strong>{formatInteger(data.activeChains)}</strong>
                 </div>
                 <div>
-                  <span>Rewards</span>
-                  <strong>{formatUpokt(toBigInt(data.totalRevenueUpokt), 1)}</strong>
+                  <span>Relays</span>
+                  <strong>{formatCompactNumber(data.totalRelays)}</strong>
                 </div>
                 <div>
-                  <span>{cuCoverageComplete ? "Compute Units" : "Relay Volume"}</span>
-                  <strong>{formatCompactNumber(cuCoverageComplete ? data.totalEstimatedComputeUnits : data.totalRelays)}</strong>
+                  <span>{cuCoverageComplete ? "Compute Units" : "Known Compute Units"}</span>
+                  <strong>{formatCompactNumber(data.totalEstimatedComputeUnits)}</strong>
+                  {!cuCoverageComplete && <span className="muted" style={{ fontSize: '0.7rem' }}>Partial coverage</span>}
                 </div>
               </div>
               <div className="network-pulse-footer">
@@ -395,19 +393,19 @@ export default function DashboardView({ initialWindow, dataByWindow, networkHist
               <h2>Pocket Network Highlights.</h2>
               <ul className="narrative-points">
                 <li>
-                  <strong>{formatDecimal(revenuePerMillionCU, 2)} POKT</strong> earned per 1M {cuLabel} in this period.
-                </li>
-                <li>
-                  <strong>{formatUsd(revenuePerMillionCU * data.poktPriceUsd, 2)}</strong> estimated value per 1M {cuLabel}.
-                </li>
-                <li>
                   <strong>{topService ? topService.serviceName : "n/a"}</strong> is the top reward chain in this period.
                 </li>
-                {!cuCoverageComplete && (
-                <li className="muted">
-                  <em>Estimated compute unit coverage is incomplete ({formatPercent(data.relayCoverage * 100, 0)}); CU-denominated values are derived from sampled relays.</em>
+                <li>
+                  {data.totalEstimatedComputeUnits > 0 && cuCoverageComplete ? (
+                    <><strong>{formatDecimal((() => { const r = toPoktNumber(data.totalRevenueUpokt); return data.totalEstimatedComputeUnits > 0 ? (r / data.totalEstimatedComputeUnits) * 1_000_000_000 : 0; })(), 2)} POKT</strong> (${formatUsd((() => { const r = toPoktNumber(data.totalRevenueUpokt); return data.totalEstimatedComputeUnits > 0 ? (r / data.totalEstimatedComputeUnits) * 1_000_000_000 : 0; })() * data.poktPriceUsd, 2)}) earned per 1B estimated compute units.
+                    </>
+                  ) : (
+                    <>POKT per 1B CU: n/a. Compute-unit coverage is incomplete.</>
+                  )}
                 </li>
-                )}
+                <li>
+                  <strong>{formatDecimal(data.totalRelays > 0 ? (toPoktNumber(data.totalRevenueUpokt) / data.totalRelays) * 1_000_000 : 0, 2)} POKT</strong> (${formatUsd((data.totalRelays > 0 ? (toPoktNumber(data.totalRevenueUpokt) / data.totalRelays) * 1_000_000 : 0) * data.poktPriceUsd, 2)}) earned per 1M finalized relays.
+                </li>
               </ul>
             </article>
           </div>

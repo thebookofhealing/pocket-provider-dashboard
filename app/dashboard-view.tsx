@@ -6,8 +6,6 @@ import {
   formatCompactNumber,
   formatDecimal,
   formatInteger,
-  formatPercent,
-  formatRelativeRange,
   formatUsd,
   formatUpokt
 } from "@/lib/format";
@@ -34,13 +32,6 @@ function toBigInt(value: string): bigint {
 
 function toPoktNumber(value: string): number {
   return Number(toBigInt(value)) / 1_000_000;
-}
-
-function compareRevenueDesc<T extends { revenueUpokt: string }>(a: T, b: T): number {
-  const aRevenue = BigInt(a.revenueUpokt);
-  const bRevenue = BigInt(b.revenueUpokt);
-  if (aRevenue === bRevenue) return 0;
-  return bRevenue > aRevenue ? 1 : -1;
 }
 
 function buildNetworkTrendPaths(points: Array<{ revenue: number; rewardCompleteness?: string }>, maxRevenue: number): string[] {
@@ -105,8 +96,7 @@ function NetworkTrendPanel({ history }: { history: SerializedNetworkDailyHistory
     <section className="panel section network-trend-panel themed section-theme-demand" style={{ position: 'relative' }}>
       <div className="section-title-row">
         <div>
-          <span className="eyebrow eyebrow-ghost">Market</span>
-          <h2 className="section-title">Network Trend</h2>
+          <h2 className="section-title">Network Trends</h2>
           <p className="section-subtitle">Daily rewards and finalized compute unit demand over the last 30 days.</p>
         </div>
         <span className="pill" style={{ background: 'rgba(255,255,255,0.05)', color: 'var(--text)' }}>Last 30 Completed UTC Days</span>
@@ -182,7 +172,7 @@ function NetworkTrendPanel({ history }: { history: SerializedNetworkDailyHistory
             </span>
             <span>
               <span className="network-trend-legend-line" />
-              Daily rewards, independently scaled
+              Daily rewards distributed in POKT
             </span>
           </p>
         </>
@@ -301,13 +291,13 @@ export default function DashboardView({ initialWindow, dataByWindow, networkHist
     );
   }
 
-  const servicesByRevenue = [...data.services].sort(compareRevenueDesc);
-  const topService = servicesByRevenue[0];
+  const servicesByRelays = [...data.services].sort((a, b) => b.relays - a.relays);
+  const topService = servicesByRelays[0];
   const cuCoverageComplete = (data.computeUnitCoverage ?? 0) >= 1;
-  const indexerLag =
-    data.indexerTargetHeight != null && data.indexerProcessedHeight != null
-      ? Math.max(0, data.indexerTargetHeight - data.indexerProcessedHeight)
-      : null;
+  const rewardPoolUsd = toPoktNumber(data.totalRevenueUpokt) * data.poktPriceUsd;
+  const rewardsPerMillionRelays = data.totalRelays > 0
+    ? (toPoktNumber(data.totalRevenueUpokt) / data.totalRelays) * 1_000_000
+    : 0;
   return (
     <main className="page">
       <section className="hero hero-stack dashboard-hero">
@@ -341,13 +331,8 @@ export default function DashboardView({ initialWindow, dataByWindow, networkHist
               <div className="hero-highlight-grid dashboard-primary-metrics">
                 <div className="hero-highlight metric-glow-revenue">
                   <span className="hero-highlight-label">Reward Pool</span>
-                  <strong className="accent-number">{formatUpokt(toBigInt(data.totalRevenueUpokt), 1)}</strong>
+                  <strong className="accent-number reward-pool-value">{formatUpokt(toBigInt(data.totalRevenueUpokt), 1)}</strong>
                   <p>Total rewards distributed in the selected period.</p>
-                </div>
-                <div className="hero-highlight metric-glow-demand">
-                  <span className="hero-highlight-label">Estimated USD Value</span>
-                  <strong className="accent-number">{formatUsd(toPoktNumber(data.totalRevenueUpokt) * data.poktPriceUsd, 1)}</strong>
-                  <p>POKT rewards valued at the latest available market price.</p>
                 </div>
               </div>
             </div>
@@ -355,19 +340,17 @@ export default function DashboardView({ initialWindow, dataByWindow, networkHist
             <aside className="hero-side panel-inset network-pulse-card">
               <div className="section-title-row compact-gap">
                 <div>
-                  <span className="eyebrow eyebrow-ghost">Live On-chain Data</span>
                   <h2 className="section-title">Network Information</h2>
-                  <p className="muted">Integrate your RPC nodes with Pocket Network to maximize your revenues.</p>
+                  <p className="muted">Do you run RPC nodes? Pocket routes traffic to your nodes and pays you for serving relays.</p>
                 </div>
-                <span className="pill">{indexerLag == null || indexerLag <= 10 ? "Synced" : "Catching up"}</span>
               </div>
               <div className="network-pulse-grid">
                 <div>
-                  <span title="Privacy-safe provider cohorts inferred from observed domains, owners, and suppliers. This is not a named operator ranking.">Unique Providers</span>
+                  <span title="Distinct privacy-safe provider cohorts that served relays in the selected period, inferred from observed domains with owner and supplier fallbacks.">Active Providers</span>
                   <strong>{formatInteger(data.activeProviders)}</strong>
                 </div>
                 <div>
-                  <span>Chains with Activity</span>
+                  <span>Supported Chains</span>
                   <strong>{formatInteger(data.activeChains)}</strong>
                 </div>
                 <div>
@@ -380,31 +363,21 @@ export default function DashboardView({ initialWindow, dataByWindow, networkHist
                   {!cuCoverageComplete && <span className="muted" style={{ fontSize: '0.7rem' }}>Partial coverage</span>}
                 </div>
               </div>
-              <div className="network-pulse-footer">
-                <span>Height <strong>{formatInteger(data.latestHeight)}</strong></span>
-                {indexerLag != null && <span>Lag <strong>{formatInteger(indexerLag)} blocks</strong></span>}
-              </div>
             </aside>
           </div>
 
           <div className="hero-support-grid" style={{ gridTemplateColumns: "1fr", marginTop: "32px" }}>
             <article className="panel narrative-card dashboard-insight-card">
-              <span className="eyebrow eyebrow-ghost">Highlights</span>
               <h2>Pocket Network Highlights.</h2>
               <ul className="narrative-points">
                 <li>
-                  <strong>{topService ? topService.serviceName : "n/a"}</strong> is the top reward chain in this period.
+                  <strong>{topService ? topService.serviceName : "n/a"}</strong> had the most relays in the selected period.
                 </li>
                 <li>
-                  {data.totalEstimatedComputeUnits > 0 && cuCoverageComplete ? (
-                    <><strong>{formatDecimal((() => { const r = toPoktNumber(data.totalRevenueUpokt); return data.totalEstimatedComputeUnits > 0 ? (r / data.totalEstimatedComputeUnits) * 1_000_000_000 : 0; })(), 2)} POKT</strong> (${formatUsd((() => { const r = toPoktNumber(data.totalRevenueUpokt); return data.totalEstimatedComputeUnits > 0 ? (r / data.totalEstimatedComputeUnits) * 1_000_000_000 : 0; })() * data.poktPriceUsd, 2)}) earned per 1B estimated compute units.
-                    </>
-                  ) : (
-                    <>POKT per 1B CU: n/a. Compute-unit coverage is incomplete.</>
-                  )}
+                  <strong>{formatUsd(rewardPoolUsd, 1)}</strong> worth of POKT distributed to providers in the selected period.
                 </li>
                 <li>
-                  <strong>{formatDecimal(data.totalRelays > 0 ? (toPoktNumber(data.totalRevenueUpokt) / data.totalRelays) * 1_000_000 : 0, 2)} POKT</strong> (${formatUsd((data.totalRelays > 0 ? (toPoktNumber(data.totalRevenueUpokt) / data.totalRelays) * 1_000_000 : 0) * data.poktPriceUsd, 2)}) earned per 1M finalized relays.
+                  <strong>{formatDecimal(rewardsPerMillionRelays, 2)} POKT</strong> ({formatUsd(rewardsPerMillionRelays * data.poktPriceUsd, 2)}) earned per 1M finalized relays.
                 </li>
               </ul>
             </article>

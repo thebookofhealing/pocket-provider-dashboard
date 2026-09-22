@@ -368,9 +368,23 @@ code {
   font-size: clamp(1.05rem, 1.4vw, 1.22rem);
 }
 
+.dashboard-hero-copy h1 {
+  font-size: clamp(2rem, 4.2vw, 3.75rem);
+  white-space: nowrap;
+}
+
+.hero-highlight-grid.dashboard-primary-metrics {
+  grid-template-columns: minmax(0, 1fr);
+}
+
 .dashboard-primary-metrics .hero-highlight {
   position: relative;
   overflow: hidden;
+}
+
+.dashboard-primary-metrics .reward-pool-value {
+  font-size: clamp(1.7rem, 3.5vw, 3rem);
+  white-space: nowrap;
 }
 
 .dashboard-primary-metrics .hero-highlight::after {
@@ -2698,6 +2712,12 @@ code {
 
   .hero-copy-strong h1 {
     font-size: 3rem;
+  }
+
+  .dashboard-hero-copy h1 {
+    font-size: clamp(1.45rem, 6.2vw, 2rem);
+    letter-spacing: -0.04em;
+    white-space: nowrap;
   }
 
   .provider-head-top, .provider-head-actions, .section-title-row {

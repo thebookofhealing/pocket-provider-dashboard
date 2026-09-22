@@ -7,7 +7,7 @@ import { useState, useEffect } from "react";
 const NAV_ITEMS = [
   { 
     href: "/", 
-    label: "Dashboard",
+    label: "Overview",
     icon: (
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
         <rect x="3" y="3" width="7" height="9" />

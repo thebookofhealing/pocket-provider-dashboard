@@ -20,6 +20,8 @@ Read project documentation in this order:
 3. **ROADMAP.md** — future product/architecture direction; not a substitute for an approved GitHub execution plan.
 4. **GitHub issues and PRs** — scoped work, decisions, incidents, and implementation history. Closed superseded planning issues are historical context only unless explicitly referenced by a newer plan.
 
+Production runner, deployment, backup, and rollback procedures are documented in [`docs/PRODUCTION_DEPLOYMENT.md`](docs/PRODUCTION_DEPLOYMENT.md).
+
 ## Branch Scope
 
 - `main`: canonical product and release branch.

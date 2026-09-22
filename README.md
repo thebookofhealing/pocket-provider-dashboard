@@ -94,8 +94,8 @@ Some details are important when reading the numbers shown in the UI.
 - RPC pool:
   - `https://sauron-rpc.infra.pocket.network`
   - `https://pocket-rpc.polkachu.com:443`
-  - `https://rpc.pocket.chaintools.tech:443`
   - `https://pocket.api.pocket.network:443`
+  - `https://pocket-rpc.kleomedes.network`
 - REST:
   - `https://sauron-api.infra.pocket.network`
 

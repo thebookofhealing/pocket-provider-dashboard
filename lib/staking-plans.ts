@@ -1,4 +1,3 @@
-import { unstable_cache } from "next/cache";
 import { derivePlanEconomics, isSourceFresh, normalizeSourceTimestamp } from "@/lib/staking-economics";
 
 export const DEFAULT_POKT_PER_SUPPLIER = 59_500;
@@ -27,7 +26,15 @@ export type StakingPlansSnapshot = {
 };
 
 type ProviderPlanMetadata = Omit<PublicPlan, "apr" | "displayedYield"> & { domain: string };
-type RewardRow = { domain?: string | null; day?: string | null; grossRewards?: string | number | null; suppliersCount?: number | null };
+type IgniterRewardService = {
+  gross_rewards?: string | number | null;
+  staked_suppliers?: string | number | null;
+};
+type IgniterRewardPayload = { services?: IgniterRewardService[] };
+type IgniterSource = {
+  status?: { lastProcessedTimestamp?: string | null };
+  allocation?: { value?: string | null } | null;
+};
 
 // Igniter's public UI does not expose an unauthenticated plan-status endpoint.
 // Keep plan terms explicit, but source reward economics and the protocol minimum
@@ -67,8 +74,6 @@ function toNumber(value: unknown): number | null {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
-function isoDate(date: Date): string { return date.toISOString().slice(0, 10); }
-
 async function fetchMinimumSupplierStake(): Promise<number> {
   const response = await fetch(`${POCKET_REST_URL}/pokt-network/poktroll/supplier/params`, { cache: "no-store", signal: AbortSignal.timeout(10_000) });
   if (!response.ok) throw new Error(`Pocket supplier params returned ${response.status}`);
@@ -78,38 +83,42 @@ async function fetchMinimumSupplierStake(): Promise<number> {
   return upokt / 1_000_000;
 }
 
-async function fetchLivePlans(): Promise<StakingPlansSnapshot> {
-  const now = new Date();
-  const start = new Date(now.getTime() - 6 * 24 * 60 * 60 * 1000);
-  const query = `query($start: Date!, $end: Date!) {
-    status: _metadata { lastProcessedTimestamp }
-    rewards: domainServiceDailyRewards(filter: { day: { greaterThanOrEqualTo: $start, lessThanOrEqualTo: $end } }, first: 5000) {
-      nodes { domain day grossRewards suppliersCount }
-    }
-  }`;
-  const [rewardData, minimumStake] = await Promise.all([
-    fetchGraphQL<{ status?: { lastProcessedTimestamp?: string | null }; rewards?: { nodes?: RewardRow[] } }>(query, { start: isoDate(start), end: isoDate(now) }),
-    fetchMinimumSupplierStake()
-  ]);
-  const rows = rewardData.rewards?.nodes ?? [];
-  if (rows.length === 0) throw new Error("Pocket GraphQL returned no seven-day provider rewards");
-
-  const rewardsByDomain = new Map<string, number>();
-  for (const row of rows) {
-    const domain = row.domain?.toLowerCase().trim();
-    const gross = toNumber(row.grossRewards);
-    const suppliers = toNumber(row.suppliersCount);
-    if (!domain || gross == null || suppliers == null || suppliers <= 0) continue;
-    rewardsByDomain.set(domain, (rewardsByDomain.get(domain) ?? 0) + gross / suppliers);
-  }
-  const sourceUpdatedAt = normalizeSourceTimestamp(rewardData.status?.lastProcessedTimestamp);
+export function buildLivePlans(
+  source: IgniterSource,
+  rewardsByDomain: Map<string, IgniterRewardService[]>,
+  minimumStake: number,
+  now = new Date(),
+  metadata = PLAN_METADATA
+): StakingPlansSnapshot {
+  const sourceUpdatedAt = normalizeSourceTimestamp(source.status?.lastProcessedTimestamp);
   if (!isSourceFresh(sourceUpdatedAt, now.getTime(), REFRESH_INTERVAL_MS)) throw new Error("Pocket GraphQL reward source is stale");
+  const allocationValue = source.allocation?.value;
+  if (!allocationValue) throw new Error("Pocket GraphQL supplier allocation is unavailable");
+  let supplierAllocation: number;
+  try {
+    supplierAllocation = toNumber((JSON.parse(allocationValue) as { supplier?: unknown }).supplier) ?? NaN;
+  } catch {
+    supplierAllocation = NaN;
+  }
+  if (!Number.isFinite(supplierAllocation) || supplierAllocation < 0 || supplierAllocation > 1) {
+    throw new Error("Pocket GraphQL supplier allocation is invalid");
+  }
 
-  const plans = PLAN_METADATA.map((metadata) => {
-    const grossSevenDayPerSupplierUpokt = rewardsByDomain.get(metadata.domain);
-    if (grossSevenDayPerSupplierUpokt == null) return null;
-    const economics = derivePlanEconomics(grossSevenDayPerSupplierUpokt, metadata.clientShare, minimumStake);
-    return { ...metadata, displayedYield: economics.netDailyPokt, apr: economics.apr };
+  const plans = metadata.map((planMetadata) => {
+    const services = rewardsByDomain.get(planMetadata.domain);
+    if (!services || services.length === 0) return null;
+    let grossSevenDayPerSupplierUpokt = 0;
+    for (const service of services) {
+      const gross = toNumber(service.gross_rewards);
+      const suppliers = toNumber(service.staked_suppliers);
+      if (gross == null || suppliers == null || suppliers <= 0) return null;
+      // This mirrors Igniter's address-group workflow: supplier allocation is
+      // applied to gross rewards before dividing by the service's live
+      // supplier count, then the UI divides the seven-day total by seven.
+      grossSevenDayPerSupplierUpokt += Math.floor(gross * supplierAllocation) / suppliers;
+    }
+    const economics = derivePlanEconomics(grossSevenDayPerSupplierUpokt, planMetadata.clientShare, minimumStake);
+    return { ...planMetadata, displayedYield: economics.netDailyPokt, apr: economics.apr };
   }).filter((plan): plan is ProviderPlanMetadata & { displayedYield: number; apr: number } => plan !== null)
     .filter((plan) => plan.apr > MINIMUM_DISPLAY_APR)
     .sort((a, b) => b.apr - a.apr || a.provider.localeCompare(b.provider))
@@ -119,11 +128,36 @@ async function fetchLivePlans(): Promise<StakingPlansSnapshot> {
   return { plans, fetchedAt: now.toISOString(), sourceUpdatedAt, minimumSupplierStake: minimumStake, stale: false, source: "igniter-indexer" };
 }
 
-async function loadStakingPlans(): Promise<StakingPlansSnapshot> {
+async function fetchLivePlans(): Promise<StakingPlansSnapshot> {
+  const now = new Date();
+  const sourceQuery = `query {
+    status: _metadata { lastProcessedTimestamp }
+    allocation: param(id: "tokenomics-mint_allocation_percentages") { value }
+  }`;
+  const source = await fetchGraphQL<IgniterSource>(sourceQuery);
+  const sourceUpdatedAt = normalizeSourceTimestamp(source.status?.lastProcessedTimestamp);
+  if (!sourceUpdatedAt) throw new Error("Pocket GraphQL latest block timestamp is unavailable");
+  const latestBlock = new Date(sourceUpdatedAt);
+  const endTs = new Date(Date.UTC(latestBlock.getUTCFullYear(), latestBlock.getUTCMonth(), latestBlock.getUTCDate(), 23, 59, 59, 999));
+  const startTs = new Date(Date.UTC(latestBlock.getUTCFullYear(), latestBlock.getUTCMonth(), latestBlock.getUTCDate() - 6, 0, 0, 0, 0));
+  const rewardsQuery = `query($domains: [String!], $startTs: Datetime!, $endTs: Datetime!) {
+    rewards: getRewardsByDomainsAndTimeGroupByService(domains: $domains, startTs: $startTs, endTs: $endTs)
+  }`;
+  const rewardEntries = await Promise.all(PLAN_METADATA.map(async (metadata) => {
+    const data = await fetchGraphQL<{ rewards?: IgniterRewardPayload }>(rewardsQuery, {
+      domains: [metadata.domain], startTs: startTs.toISOString(), endTs: endTs.toISOString()
+    });
+    return [metadata.domain, data.rewards?.services ?? []] as const;
+  }));
+  const minimumStake = await fetchMinimumSupplierStake();
+  return buildLivePlans(source, new Map(rewardEntries), minimumStake, now);
+}
+
+async function loadStakingPlans(fetcher: () => Promise<StakingPlansSnapshot> = fetchLivePlans): Promise<StakingPlansSnapshot> {
   const now = Date.now();
   if (lastSuccessfulSnapshot && now - new Date(lastSuccessfulSnapshot.fetchedAt).getTime() < REFRESH_INTERVAL_MS) return lastSuccessfulSnapshot;
   try {
-    lastSuccessfulSnapshot = await fetchLivePlans();
+    lastSuccessfulSnapshot = await fetcher();
     return lastSuccessfulSnapshot;
   } catch {
     if (lastSuccessfulSnapshot) return { ...lastSuccessfulSnapshot, stale: true, source: "last-known-good" };
@@ -131,5 +165,10 @@ async function loadStakingPlans(): Promise<StakingPlansSnapshot> {
   }
 }
 
-export const getStakingPlans = unstable_cache(loadStakingPlans, ["staking-plans"], { revalidate: 15 * 60, tags: ["staking-plans"] });
-export const __testing = { fetchLivePlans, loadStakingPlans };
+export const getStakingPlans = () => loadStakingPlans();
+export const __testing = {
+  fetchLivePlans,
+  loadStakingPlans,
+  buildLivePlans,
+  resetLastSuccessfulSnapshot: () => { lastSuccessfulSnapshot = null; }
+};

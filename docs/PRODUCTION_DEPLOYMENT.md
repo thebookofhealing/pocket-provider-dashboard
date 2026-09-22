@@ -1,73 +1,242 @@
-# Production deployment
+# Production deployment with a GitHub self-hosted runner
 
-Production is deployed automatically from the canonical `main` branch by one repository-scoped GitHub Actions self-hosted runner.
+This document is the operational source of truth for deploying `pocket-provider-dashboard` to the production VM.
 
-## Runner boundary
+## Deployment model
 
-- Repository: `tsulhc/pocket-provider-dashboard`
-- Required labels: `self-hosted`, `linux`, `x64`, `pocket-provider-production`
-- The runner runs as the dedicated unprivileged deployment account and is not shared with other repositories.
-- Registration tokens are short-lived setup credentials. Never commit, persist, or print them.
-- The workflow has `contents: read` only and runs on `push` to `main`; pull requests and arbitrary refs never execute on the production runner.
-- Deployments use one non-canceling concurrency group, so production activations are serialized.
+Production is deployed by a **repository-level GitHub Actions self-hosted runner** installed on the production VM.
 
-## Host layout
+The workflow:
 
-The workflow uses `/srv/pocket-provider-dashboard` as its deployment root:
+- runs only for pushes to `main` (including merged pull requests)
+- requires the runner label `pocket-provider-production`
+- has read-only repository permissions
+- checks out the exact commit being deployed
+- builds a new release away from the live application
+- creates and verifies an online SQLite backup before switching `/srv/pocket-provider-dashboard/current`
+- reloads both PM2 processes: `pocket-dashboard` and `pocket-indexer`
+- verifies `http://127.0.0.1:3100/api/health`
+- automatically restores the previous release if activation or health verification fails
+- keeps the latest five releases by default
 
-```text
-/srv/pocket-provider-dashboard/
-  current -> releases/<full-git-sha>
-  releases/<full-git-sha>/       immutable application release
-  shared/.env.production         production environment, outside releases
+SQLite and production environment configuration are deliberately stored outside release directories.
+
+## Files
+
+- `.github/workflows/deploy-production.yml` — GitHub Actions entry point
+- `scripts/deploy-production.sh` — release, validation, activation, rollback, cleanup
+- `ecosystem.config.cjs` — PM2 process definition
+
+## One-time VM bootstrap
+
+Use a dedicated unprivileged account for both the runner and the PM2 processes. The examples below use `pocketdeploy`.
+
+Install or verify these system tools:
+
+- Node.js 22 or newer
+- npm
+- git
+- rsync
+- curl
+- build toolchain required by native npm modules
+- PM2 available in the `pocketdeploy` user's PATH
+
+Create the runtime directories:
+
+```bash
+sudo useradd --create-home --shell /bin/bash pocketdeploy 2>/dev/null || true
+
+sudo mkdir -p \
+  /srv/pocket-provider-dashboard/releases \
+  /srv/pocket-provider-dashboard/shared/data
+
+sudo chown -R pocketdeploy:pocketdeploy /srv/pocket-provider-dashboard
+sudo chmod 0750 /srv/pocket-provider-dashboard
+sudo chmod 0750 /srv/pocket-provider-dashboard/shared
 ```
 
-The canonical SQLite database, WAL/SHM files, and backups remain outside `releases/`. The database path is supplied by `POCKET_SQLITE_PATH` in the VM-local environment file and must be absolute, persistent, readable, and outside the release tree. Backups are stored in the VM-local `POCKET_BACKUP_DIR` (default `/var/backups/pocket-dashboard`).
+The runner account should **not** have unrestricted sudo access. The deploy workflow does not require sudo.
 
-## Deployment sequence
+### Production environment file
 
-For the exact pushed `main` SHA, the workflow:
+Create:
 
-1. checks out that full SHA;
-2. creates a SHA-keyed release directory;
-3. runs `npm ci`, `npm run typecheck`, and `npm run build`;
-4. validates the persistent environment and database prerequisites;
-5. creates and integrity-checks an online SQLite backup before activation;
-6. atomically switches `current` to the new release;
-7. reloads the PM2 web and indexer processes from `current`;
-8. verifies local HTTP health, both PM2 processes, indexer lock/height stability, and the active SHA;
-9. retains the immediate previous release and bounded older-release history.
+```text
+/srv/pocket-provider-dashboard/shared/.env.production
+```
 
-The web process uses `POCKET_DB_READONLY=true`; the indexer is the sole canonical database writer. A failed build, typecheck, prerequisite check, or backup leaves the current release untouched. A post-activation health failure switches application code back to the immediate previous release and restarts PM2 without restoring or replacing SQLite.
+Minimum persistence requirement:
+
+```bash
+POCKET_SQLITE_PATH=/var/lib/pocket-dashboard/pocket.sqlite
+```
+
+Add the production Pocket RPC/indexer configuration required by the environment to the same file. Do not commit secrets or production-only values to Git.
+
+Protect it:
+
+```bash
+sudo chown pocketdeploy:pocketdeploy /srv/pocket-provider-dashboard/shared/.env.production
+sudo chmod 0600 /srv/pocket-provider-dashboard/shared/.env.production
+```
+
+The existing production SQLite database remains at the configured persistent path outside `releases/`. The deployment never copies, replaces, truncates, or moves the canonical database.
+
+## Register the GitHub runner
+
+In GitHub open:
+
+`Repository -> Settings -> Actions -> Runners -> New self-hosted runner`
+
+Choose Linux/x64 and execute the download/install commands shown by GitHub as the `pocketdeploy` user. Use a dedicated repository runner, not an organization-wide generic runner.
+
+During configuration use:
+
+- runner name: `pocket-provider-prod-1`
+- labels: `pocket-provider-production`
+- repository URL: `https://github.com/tsulhc/pocket-provider-dashboard`
+
+Equivalent configuration shape:
+
+```bash
+./config.sh \
+  --url https://github.com/tsulhc/pocket-provider-dashboard \
+  --token <SHORT_LIVED_REGISTRATION_TOKEN_FROM_GITHUB> \
+  --name pocket-provider-prod-1 \
+  --labels pocket-provider-production \
+  --unattended
+```
+
+Install the runner as a system service using the service commands included with the downloaded runner package. The service must run as `pocketdeploy`.
+
+After registration, GitHub should show the runner as **Idle** with labels including:
+
+- `self-hosted`
+- `linux`
+- `x64`
+- `pocket-provider-production`
+
+The runner initiates its connection to GitHub. No inbound GitHub-to-runner port is required; allow the VM outbound HTTPS on TCP 443 to the GitHub endpoints required by Actions.
+
+## PM2 boot persistence
+
+The first successful deployment creates/reloads the PM2 applications and runs `pm2 save`.
+
+Configure PM2 startup once on the VM so the saved process list is resurrected after reboot. Run the `pm2 startup` command as `pocketdeploy`, then execute only the exact privileged command printed by PM2.
+
+After that:
+
+```bash
+pm2 save
+pm2 status
+```
+
+## First deployment
+
+Do not merge the deployment workflow until all of these are true:
+
+1. the self-hosted runner is online and Idle
+2. Node.js 22+, npm, PM2, rsync and curl are available to the runner service user
+3. `/srv/pocket-provider-dashboard/shared/.env.production` exists
+4. `POCKET_SQLITE_PATH` points outside `releases/`
+5. the production DB, if any, is available at that path
+
+Merging the deployment PR into `main` produces a push to `main` and starts the first deployment automatically.
+
+## Normal deployment
+
+Every later push or merge to `main` runs:
+
+```text
+checkout exact commit
+    |
+create isolated release
+    |
+npm ci
+    |
+npm run typecheck
+    |
+npm run build
+    |
+verified SQLite backup
+    |
+switch current symlink
+    |
+PM2 startOrReload
+    |
+GET /api/health
+    |
+pm2 save
+```
+
+`concurrency.cancel-in-progress: false` prevents a newer push from interrupting a deployment halfway through activation. The web process uses `POCKET_DB_READONLY=true`; the indexer is the only canonical SQLite writer.
 
 ## Verification
 
+On the VM:
+
 ```bash
-pm2 status
-curl --fail http://127.0.0.1:3100/
-curl --fail http://127.0.0.1:3100/api/health
 readlink -f /srv/pocket-provider-dashboard/current
+pm2 status
+curl -fsS http://127.0.0.1:3100/api/health
+pm2 logs pocket-dashboard --lines 100
+pm2 logs pocket-indexer --lines 100
+# confirm both processes are online and indexer height/heartbeat advances
 ```
 
-The deployment log records the triggering/deployed SHA, backup verification, PM2 status, web health, and stable indexer samples without printing environment values or credentials.
+In GitHub, the `Deploy production` workflow run should finish successfully on runner `pocket-provider-prod-1`.
 
-## Application rollback
+## Rollback behavior
 
-Rollback is application-only:
+The deploy script creates a verified online backup before activation. If the new release fails after the `current` symlink is switched, it automatically:
 
-1. identify the immediate previous SHA-keyed directory under `releases/`;
-2. atomically point `current` to that directory;
-3. load the VM-local environment and PM2 configuration;
-4. reload the web and indexer processes;
-5. verify HTTP, PM2, indexer health, and unchanged canonical DB path;
-6. document the deployed and rollback SHAs.
+1. switches `current` back to the previous release
+2. reloads the previous PM2 configuration
+3. saves the restored PM2 process list
+4. removes the failed release
+5. marks the GitHub Actions job failed
 
-The rollback path supports the pre-runner `eeb4933` baseline, which does not contain a checked-in PM2 ecosystem file; it falls back to the still-present candidate configuration when needed. Never delete WAL/SHM files or overwrite/restore the live database automatically. Any data restore is a separate, reviewed recovery operation using a verified backup.
+A build or typecheck failure occurs before activation, so it does not affect the currently running production release.
 
-## Disable or replace the runner
+For a manual rollback, point `current` to a known-good release and reload PM2:
 
-To disable automatic deployment, disable the `Deploy production` workflow or stop the dedicated runner service. Do not delete releases, the database, WAL/SHM files, or backups. To replace the runner, take the old service offline, remove its repository registration in GitHub, then register the replacement with a new short-lived token and the same labels.
+```bash
+cd /srv/pocket-provider-dashboard
+ls -1t releases
 
-## Current closeout evidence
+ln -sfn /srv/pocket-provider-dashboard/releases/<GOOD_RELEASE> .current.rollback
+mv -Tf .current.rollback current
 
-The first controlled deployment completed successfully for `849b3d7e1ac0230588bb5925d55a070537e4337a`. Its workflow run performed the build/typecheck, verified an online SQLite backup before activation, reloaded both PM2 processes, and observed five stable indexer health samples. Historical contiguous-height repair remains tracked separately in issue #5.
+set -a
+. /srv/pocket-provider-dashboard/shared/.env.production
+set +a
+
+export DEPLOY_ROOT=/srv/pocket-provider-dashboard
+pm2 startOrReload /srv/pocket-provider-dashboard/current/ecosystem.config.cjs --update-env
+pm2 save
+
+curl -fsS http://127.0.0.1:3100/api/health
+```
+
+## Security notes
+
+The production runner executes repository-controlled shell code directly on the production VM. Treat write access to `main` and the deployment workflow as production access.
+
+For this reason:
+
+- keep this runner repository-scoped and dedicated to this application
+- do not add `pull_request` as a trigger for the production job
+- do not give the runner user unrestricted sudo
+- keep production secrets in the VM-local `.env.production`, not in the repository
+- retain `permissions: contents: read` and `persist-credentials: false`
+- review changes to `.github/workflows/deploy-production.yml`, `scripts/deploy-production.sh`, and `ecosystem.config.cjs` as privileged production changes
+
+GitHub's own security guidance notes that self-hosted runners are persistent machines rather than clean ephemeral environments. This repository is private, which is the appropriate starting point, but trusted write access remains important.
+
+## Emergency disable
+
+To stop automatic production activation without deleting application state, disable the production workflow in GitHub Actions or stop the dedicated runner service. Do not delete the `current` pointer, release directories, SQLite database, WAL/SHM files, or backups while disabling deployments.
+
+## Runner replacement
+
+To replace the runner, stop and disable the existing repository-runner service, remove its local runner registration with the runner's `svc.sh`/`config.sh remove` flow, and register the replacement through the repository's **New self-hosted runner** flow. Use a fresh short-lived registration token and never commit or document it. Verify the replacement has the `pocket-provider-production` label before re-enabling production deployments.

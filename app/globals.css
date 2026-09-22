@@ -2419,6 +2419,8 @@ code {
   margin: 0;
   color: var(--muted);
 }
+.calculator-quick-facts ul { margin: 0; padding-left: 18px; color: var(--muted); font-size: .8rem; line-height: 1.55; }
+.calculator-quick-facts li + li { margin-top: 4px; }
 
 .calculator-actions {
   display: flex;
@@ -2618,6 +2620,10 @@ code {
 .staking-lookback strong { color: var(--text); font-size: .92rem; }
 .staking-verified-badge { display: inline-flex; align-items: center; gap: 6px; padding: 6px 9px; border: 1px solid rgba(74, 222, 128, .25); border-radius: 999px; background: rgba(74, 222, 128, .08); color: #86efac; font-size: .68rem; font-weight: 800; letter-spacing: .04em; text-transform: uppercase; white-space: nowrap; }
 .staking-verified-badge::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: #4ade80; box-shadow: 0 0 8px rgba(74, 222, 128, .55); }
+.staking-verified-badge.stale { border-color: rgba(251, 191, 36, .28); background: rgba(251, 191, 36, .08); color: #fcd34d; }
+.staking-verified-badge.stale::before { background: #fbbf24; box-shadow: 0 0 8px rgba(251, 191, 36, .55); }
+.staking-feed-status { color: #86efac; font-size: .78rem; font-weight: 700; }
+.staking-feed-status.stale { color: #fcd34d; }
 .staking-method-note { display: grid; grid-template-columns: 26px 1fr; gap: 11px; padding: 15px; border: 1px solid rgba(0, 194, 255, .18); border-radius: var(--radius-md); background: rgba(0, 194, 255, .055); }
 .staking-method-note > span { display: grid; place-items: center; width: 22px; height: 22px; color: var(--accent); border: 1px solid rgba(0, 194, 255, .35); border-radius: 50%; font-size: .72rem; font-weight: 900; }
 .staking-method-note p { margin: 0; color: var(--muted); font-size: .76rem; line-height: 1.55; }

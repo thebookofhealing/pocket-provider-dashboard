@@ -1363,7 +1363,13 @@ const getSupplierDirectory = cache(async (): Promise<SupplierDirectory> => {
   return directory;
 });
 
-const getServiceSupplierCounts = cache(async (): Promise<ServiceSupplierCounts> => {
+const SERVICE_SUPPLIER_COUNTS_TTL_MS = 6 * 60 * 60 * 1000;
+let serviceSupplierCountsCache: { value: ServiceSupplierCounts; fetchedAt: string } | null = null;
+
+const getServiceSupplierCounts = async (): Promise<ServiceSupplierCounts> => {
+  if (serviceSupplierCountsCache && Date.now() - new Date(serviceSupplierCountsCache.fetchedAt).getTime() < SERVICE_SUPPLIER_COUNTS_TTL_MS) {
+    return serviceSupplierCountsCache.value;
+  }
   const counts: ServiceSupplierCounts = {};
   let nextKey = "";
 
@@ -1395,8 +1401,9 @@ const getServiceSupplierCounts = cache(async (): Promise<ServiceSupplierCounts> 
     if (!nextKey) break;
   }
 
+  serviceSupplierCountsCache = { value: counts, fetchedAt: new Date().toISOString() };
   return counts;
-});
+};
 
 const getPoktscanSupplierDirectory = cache(async (): Promise<SupplierDirectory> => {
   const cached = getCachedPoktscanSupplierDirectory();
@@ -1591,6 +1598,7 @@ function buildDashboardFromProviderRows(
 ): DashboardData {
   const providerMap = new Map<string, ProviderStats>();
   const serviceMap = new Map<string, ServiceStats>();
+  const historicalSupplierSets = new Map<string, Set<string>>();
   const supplierChainMap = new Map<string, Set<string>>();
   let totalRelays = 0;
   let totalRevenueUpokt = 0n;
@@ -1615,6 +1623,9 @@ function buildDashboardFromProviderRows(
     provider.revenueUpokt += row.revenueUpokt;
 
     if (row.supplierOperatorAddress && row.supplierOwnerAddress) {
+      const historicalSuppliers = historicalSupplierSets.get(row.serviceId) ?? new Set<string>();
+      historicalSuppliers.add(row.supplierOperatorAddress);
+      historicalSupplierSets.set(row.serviceId, historicalSuppliers);
       const supplier = provider.suppliers.find((entry) => entry.operatorAddress === row.supplierOperatorAddress) ?? {
         operatorAddress: row.supplierOperatorAddress,
         ownerAddress: row.supplierOwnerAddress,
@@ -1726,7 +1737,9 @@ function buildDashboardFromProviderRows(
 
   for (const service of serviceMap.values()) {
     service.providerCount = providers.filter((provider) => provider.chains.some((chain) => chain.serviceId === service.serviceId)).length;
-    service.supplierCount = serviceSupplierCounts[service.serviceId] ?? 0;
+    service.supplierCount = historicalSupplierSets.get(service.serviceId)?.size ?? 0;
+    service.eligibleSupplierCount = serviceSupplierCounts[service.serviceId] ?? 0;
+    service.eligibleSupplierCountFetchedAt = serviceSupplierCountsCache?.fetchedAt;
   }
 
   const services = Array.from(serviceMap.values()).sort((a, b) =>
@@ -1781,11 +1794,15 @@ function buildDashboard(
 ): DashboardData {
   const providerMap = new Map<string, ProviderStats>();
   const serviceMap = new Map<string, ServiceStats>();
+  const historicalSupplierSets = new Map<string, Set<string>>();
   const supplierChainMap = new Map<string, Set<string>>();
   let totalRelays = 0;
   let totalRevenueUpokt = 0n;
 
   for (const settlement of settlements) {
+    const historicalSuppliers = historicalSupplierSets.get(settlement.serviceId) ?? new Set<string>();
+    historicalSuppliers.add(settlement.supplierOperatorAddress);
+    historicalSupplierSets.set(settlement.serviceId, historicalSuppliers);
     totalRelays += settlement.numRelays;
     totalRevenueUpokt += settlement.supplierRevenueUpokt;
 
@@ -1901,7 +1918,9 @@ function buildDashboard(
 
   for (const service of serviceMap.values()) {
     service.providerCount = providers.filter((provider) => provider.chains.some((chain) => chain.serviceId === service.serviceId)).length;
-    service.supplierCount = serviceSupplierCounts[service.serviceId] ?? 0;
+    service.supplierCount = historicalSupplierSets.get(service.serviceId)?.size ?? 0;
+    service.eligibleSupplierCount = serviceSupplierCounts[service.serviceId] ?? 0;
+    service.eligibleSupplierCountFetchedAt = serviceSupplierCountsCache?.fetchedAt;
   }
 
   const services = Array.from(serviceMap.values()).sort((a, b) =>

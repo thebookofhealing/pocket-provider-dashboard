@@ -44,7 +44,11 @@ export type ServiceStats = {
   computeUnits?: number;
   computeUnitsPerRelay?: number;
   estimatedComputeUnits?: number;
+  /** Suppliers observed in the selected historical reward window. */
   supplierCount?: number;
+  /** Currently eligible on-chain suppliers, refreshed independently of rewards. */
+  eligibleSupplierCount?: number;
+  eligibleSupplierCountFetchedAt?: string;
   appsStaked?: number;
   revenueUpokt: bigint;
   providerCount: number;

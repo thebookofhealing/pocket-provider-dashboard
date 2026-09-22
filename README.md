@@ -239,6 +239,10 @@ The app uses:
 
 This keeps the public demo responsive and reduces repeated network fetches.
 
+### Live staking plan feed
+
+The staking leaderboard is server-rendered from `IGNITER_PUBLIC_PLANS_URL` and refreshed every 15 minutes. The endpoint must return either an array of plans or an object containing `plans`/`providers`; each row should include provider identity, client share, and either trailing-seven-day gross yield per supplier or the resulting net daily yield/APR. The server derives net yield and APR from the supplied seven-day economics, filters plans below 10% APR, and never fetches the feed from the browser. If the feed is unavailable, the last-known-good result is retained and the page marks it stale rather than presenting it as live.
+
 ## Repository Context
 
 Use the documentation authority order defined near the top of this README:

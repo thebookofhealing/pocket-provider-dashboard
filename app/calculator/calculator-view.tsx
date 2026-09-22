@@ -10,6 +10,7 @@ type CalculatorService = {
   revenueUpokt: string;
   providerCount: number;
   supplierCount?: number;
+  eligibleSupplierCount?: number;
   appsStaked?: number;
 };
 
@@ -21,6 +22,7 @@ export default function CalculatorView({ data }: { data: SerializedDashboardData
     revenueUpokt: s.revenueUpokt,
     providerCount: s.providerCount,
     supplierCount: s.supplierCount,
+    eligibleSupplierCount: s.eligibleSupplierCount,
     appsStaked: s.appsStaked,
   }));
 

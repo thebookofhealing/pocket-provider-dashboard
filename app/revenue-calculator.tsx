@@ -17,6 +17,7 @@ type CalculatorService = {
   revenueUpokt: string;
   providerCount: number;
   supplierCount?: number;
+  eligibleSupplierCount?: number;
   appsStaked?: number;
 };
 
@@ -42,7 +43,10 @@ export default function RevenueCalculator({ services, suppliersPerSession, sessi
   const eligibleServices = useMemo(
     () => [...services]
       .filter((service) => service.relays > MIN_MONTHLY_RELAYS)
-      .sort((a, b) => b.relays - a.relays || a.serviceName.localeCompare(b.serviceName)),
+      .sort((a, b) => {
+        const rewardOrder = BigInt(b.revenueUpokt) > BigInt(a.revenueUpokt) ? 1 : BigInt(b.revenueUpokt) < BigInt(a.revenueUpokt) ? -1 : 0;
+        return rewardOrder || b.relays - a.relays || a.serviceName.localeCompare(b.serviceName);
+      }),
     [services]
   );
   const [selectedIds, setSelectedIds] = useState<string[]>(() =>
@@ -68,7 +72,6 @@ export default function RevenueCalculator({ services, suppliersPerSession, sessi
   );
   const projectedEntryUpokt = serviceOpportunities.reduce((sum, service) => sum + service.equalShareRevenueEstimateUpokt, 0n);
   const selectedChainCount = selectedServices.length;
-  const coveredChainCount = selectedServices.filter((service) => (supplierAllocation.get(service.serviceId) ?? 0) > 0).length;
   const foundationCoveredSuppliers = Math.min(supplierCount, FREE_SUPPLIER_BUDGET);
   const selfFundedSuppliers = Math.max(0, supplierCount - FREE_SUPPLIER_BUDGET);
   const entryPerSupplierUpokt = supplierCount === 0 ? 0n : projectedEntryUpokt / BigInt(supplierCount);
@@ -105,7 +108,6 @@ export default function RevenueCalculator({ services, suppliersPerSession, sessi
             Model your potential revenue by using this calculator to determine your best expansion opportunities.
           </p>
         </div>
-        <span className="pill">Onboarding</span>
       </div>
 
       <div className="calculator-layout">
@@ -141,27 +143,22 @@ export default function RevenueCalculator({ services, suppliersPerSession, sessi
 
           <div className="calculator-kpis">
             <article className="calculator-kpi-card">
-              <span className="kpi-label">Market Demand</span>
+              <span className="kpi-label">Total rewards across selected chains</span>
               <strong className="calculator-kpi-value accent-number">{formatUpokt(selectedRevenueUpokt, 1)}</strong>
-              <span className="kpi-foot">Total rewards in selected chains</span>
             </article>
 
             <article className="calculator-kpi-card calculator-kpi-card-accent" style={{ background: 'linear-gradient(135deg, rgba(0, 194, 255, 0.05) 0%, transparent 100%)', borderColor: 'var(--cyan-accent)' }}>
-              <span className="kpi-label" style={{ color: 'var(--cyan-accent)' }}>Projected Daily Earnings</span>
+              <span className="kpi-label" style={{ color: 'var(--cyan-accent)' }}>Projected Monthly Rewards</span>
               <strong className="calculator-kpi-value accent-number" style={{ color: 'var(--cyan-accent)', textShadow: '0 0 20px rgba(0, 194, 255, 0.2)' }}>
                 {formatUpokt(projectedEntryUpokt, 1)}
               </strong>
-              <span className="kpi-foot" style={{ color: 'var(--text)' }}>
-                Estimated daily revenue
-              </span>
             </article>
           </div>
 
           <div className="calculator-meta-grid">
             <div className="calculator-meta-card">
-              <span className="hero-highlight-label">Target Footprint</span>
+              <span className="hero-highlight-label">Coverage Footprint</span>
               <strong className="accent-number">{formatInteger(selectedChainCount)} chains</strong>
-              <p>{formatInteger(coveredChainCount)} chains covered by your traffic.</p>
             </div>
 
             <div className="calculator-meta-card">
@@ -173,13 +170,13 @@ export default function RevenueCalculator({ services, suppliersPerSession, sessi
             </div>
 
             <div className="calculator-meta-card">
-              <span className="hero-highlight-label">Demand Intensity</span>
+              <span className="hero-highlight-label">Relay Demand</span>
               <strong className="accent-number">{formatCompactNumber(selectedRelays)}</strong>
               <p>Total relays across selected chains.</p>
             </div>
 
             <div className="calculator-meta-card">
-              <span className="hero-highlight-label">Supplier Efficiency</span>
+              <span className="hero-highlight-label">Supplier</span>
               <strong className="accent-number" style={{ color: 'var(--green)' }}>{formatUpokt(entryPerSupplierUpokt, 1)}</strong>
               <p>Projected revenue per active supplier.</p>
             </div>
@@ -187,14 +184,19 @@ export default function RevenueCalculator({ services, suppliersPerSession, sessi
             <div className="calculator-meta-card">
               <span className="hero-highlight-label">Selection Odds</span>
               <strong className="accent-number" style={{ color: 'var(--accent)' }}>{formatDecimal(averageSelectionProbability, 0)}%</strong>
-              <p>Avg. chance of landing a session slot on covered chains.</p>
+              <p>Averaged across selected chains.</p>
+            </div>
+
+            <div className="calculator-meta-card calculator-quick-facts">
+              <span className="hero-highlight-label">Quick Facts</span>
+              <ul>
+                <li>Pocket subsidizes the first 15 suppliers for new providers.</li>
+                <li>Suppliers are selected independently for every session.</li>
+                <li>More suppliers improve coverage odds, not guaranteed demand.</li>
+                <li>Actual rewards vary with relays, service mix, and uptime.</li>
+              </ul>
             </div>
           </div>
-
-          <p className="footer-note" style={{ opacity: 0.8 }}>
-            <strong>How it works:</strong> Suppliers are distributed across selected chains to maximize yield.
-            Competition is modeled against active suppliers on each service, while the 15-supplier subsidy assumes new-provider onboarding.
-          </p>
         </div>
 
         <div className="calculator-checklist panel-inset" style={{ borderRadius: 'var(--radius-lg)', border: '1px solid var(--border)' }}>
@@ -236,7 +238,7 @@ export default function RevenueCalculator({ services, suppliersPerSession, sessi
                     <div className="calculator-item-meta">
                       <span style={{ color: 'var(--accent)' }}>{formatUpokt(BigInt(service.revenueUpokt), 1)}</span>
                       <span>{formatInteger(service.providerCount)} providers</span>
-                      <span>{formatInteger(service.supplierCount ?? 0)} suppliers</span>
+                      <span>{formatInteger(service.eligibleSupplierCount ?? service.supplierCount ?? 0)} eligible suppliers</span>
                       <span>{formatCompactNumber(service.relays)} relays</span>
                     </div>
                   </div>

@@ -2,6 +2,7 @@ type OpportunityService = {
   serviceId: string;
   serviceName: string;
   supplierCount?: number;
+  eligibleSupplierCount?: number;
   providerCount: number;
   relays: number;
   computeUnits?: number;
@@ -15,6 +16,7 @@ export type ProviderServiceOpportunity = {
   serviceId: string;
   serviceName: string;
   supplierCount: number;
+  eligibleSupplierCount: number;
   providerCount: number;
   relays: number;
   computeUnits?: number;
@@ -36,6 +38,10 @@ function toBigInt(value: string | bigint): bigint {
 
 function toPoktNumber(value: bigint): number {
   return Number(value) / 1_000_000;
+}
+
+function getEligibleSupplierCount(service: OpportunityService): number {
+  return Math.max(0, Math.round(service.eligibleSupplierCount ?? service.supplierCount ?? 0));
 }
 
 export function getProjectedRevenueUpokt(revenueUpokt: bigint, existingSupplierCount: number, enteringSupplierCount: number): bigint {
@@ -114,7 +120,8 @@ export function buildProviderServiceOpportunity(
   providerSupplierCount: number,
   options?: { sessionSlots?: number; appsStaked?: number }
 ): ProviderServiceOpportunity {
-  const supplierCount = Math.max(service.supplierCount ?? 0, 0);
+  const supplierCount = getEligibleSupplierCount(service);
+  const historicalSupplierCount = Math.max(service.supplierCount ?? 0, 0);
   const projectedRevenueUpokt = getProjectedRevenueUpokt(toBigInt(service.revenueUpokt), supplierCount, providerSupplierCount);
   const projectedRevenuePerSupplierUpokt = providerSupplierCount > 0
     ? projectedRevenueUpokt / BigInt(providerSupplierCount)
@@ -140,7 +147,8 @@ export function buildProviderServiceOpportunity(
   const result: ProviderServiceOpportunity = {
     serviceId: service.serviceId,
     serviceName: service.serviceName,
-    supplierCount,
+    supplierCount: historicalSupplierCount,
+    eligibleSupplierCount: supplierCount,
     providerCount: service.providerCount,
     relays: service.relays,
     computeUnits: service.computeUnits,
@@ -178,7 +186,7 @@ export function allocateSuppliersByMarginalReturn(
 
   services.forEach((service, order) => {
     allocation.set(service.serviceId, 0);
-    const gain = getMarginalRevenueGainUpokt(toBigInt(service.revenueUpokt), Math.max(service.supplierCount ?? 0, 0), 0);
+    const gain = getMarginalRevenueGainUpokt(toBigInt(service.revenueUpokt), getEligibleSupplierCount(service), 0);
     heap.push({ serviceId: service.serviceId, order, gain, allocated: 0 });
   });
 
@@ -221,7 +229,7 @@ export function allocateSuppliersByMarginalReturn(
     const service = serviceById.get(top.serviceId);
     if (!service) break;
 
-    top.gain = getMarginalRevenueGainUpokt(toBigInt(service.revenueUpokt), Math.max(service.supplierCount ?? 0, 0), top.allocated);
+    top.gain = getMarginalRevenueGainUpokt(toBigInt(service.revenueUpokt), getEligibleSupplierCount(service), top.allocated);
 
     // Always allocate, even at zero gain. Never drop a candidate — this
     // guarantees allocatedTotal === supplierCount. Tie-break by serviceId.
@@ -244,7 +252,7 @@ export function buildAllocatedServiceOpportunity(
   const opportunity = buildProviderServiceOpportunity(service, enteringSupplierCount, options);
   const projectedRevenueUpokt = getProjectedRevenueUpokt(
     toBigInt(service.revenueUpokt),
-    Math.max(service.supplierCount ?? 0, 0),
+    getEligibleSupplierCount(service),
     allocatedSupplierCount
   );
   const projectedRevenuePerSupplierUpokt = allocatedSupplierCount > 0
@@ -252,8 +260,9 @@ export function buildAllocatedServiceOpportunity(
     : 0n;
   const projectedRevenuePerSupplierPokt = toPoktNumber(projectedRevenuePerSupplierUpokt);
   const sessionSlots = options?.sessionSlots ?? SESSION_SUPPLIER_SLOTS;
-  const selectionProbability = getSelectionProbability(Math.max(service.supplierCount ?? 0, 0), allocatedSupplierCount, sessionSlots);
-  const totalSuppliers = Math.max(service.supplierCount ?? 0, 0) + allocatedSupplierCount;
+  const eligibleSupplierCount = getEligibleSupplierCount(service);
+  const selectionProbability = getSelectionProbability(eligibleSupplierCount, allocatedSupplierCount, sessionSlots);
+  const totalSuppliers = eligibleSupplierCount + allocatedSupplierCount;
 
   let appComponent = 0;
   if (options?.appsStaked != null && options.appsStaked > 0) {
@@ -269,9 +278,10 @@ export function buildAllocatedServiceOpportunity(
     selectionProbability,
     equalShareRevenueEstimateUpokt: projectedRevenueUpokt,
     equalShareRevenuePerSupplierUpokt: projectedRevenuePerSupplierUpokt,
-    expectedSharePercent: (Math.max(service.supplierCount ?? 0, 0) + allocatedSupplierCount) === 0
+    eligibleSupplierCount,
+    expectedSharePercent: (eligibleSupplierCount + allocatedSupplierCount) === 0
       ? 0
-      : (allocatedSupplierCount / (Math.max(service.supplierCount ?? 0, 0) + allocatedSupplierCount)) * 100,
+      : (allocatedSupplierCount / (eligibleSupplierCount + allocatedSupplierCount)) * 100,
     opportunityScore: projectedRevenuePerSupplierPokt * (0.55 + (selectionProbability / 100) * 0.30 + appComponent)
   };
 
@@ -283,7 +293,7 @@ export function buildAllocatedServiceOpportunity(
       options.appsStaked,
       sessionSlots,
       allocatedSupplierCount,
-      Math.max(service.supplierCount ?? 0, 0) + allocatedSupplierCount
+      eligibleSupplierCount + allocatedSupplierCount
     );
     result.expectedSessionsRepresented = getExpectedSessionsRepresented(options.appsStaked, selectionProbability);
   }

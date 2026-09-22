@@ -1,35 +1,12 @@
 "use client";
 
 import { useMemo, useState } from "react";
+import type { PublicPlan, StakingPlansSnapshot } from "@/lib/staking-plans";
 
 const POKT_PER_SUPPLIER = 59_500;
 const PROJECTION_MONTHS = 6;
-const MINIMUM_DISPLAY_APR = 10;
-const PUBLIC_PLANS_SNAPSHOT_DATE = "September 22, 2026";
 
 type Scenario = "migrate" | "new";
-
-type PublicPlan = {
-  id: string;
-  provider: string;
-  plan: string;
-  apr: number;
-  clientShare: number;
-  displayedYield: number;
-  website?: string;
-};
-
-// Static reference snapshot supplied from staking.pocket.network. These values
-// must remain explicitly dated because this client component does not fetch live plans.
-const PUBLIC_PLANS: PublicPlan[] = [
-  { id: "kleomedes-public", provider: "Kleomedes", plan: "Public", apr: 65.3, clientShare: 49, displayedYield: 107.32, website: "https://kleomedes.cloud" },
-  { id: "kalorius-public", provider: "Kalorius.tech", plan: "public staking", apr: 40.7, clientShare: 20, displayedYield: 66.95, website: "https://kalorius.tech/" },
-  { id: "nodefleet-public", provider: "Nodefleet", plan: "Nodefleet-Public", apr: 28.4, clientShare: 75, displayedYield: 46.64, website: "https://nodefleet.org/" },
-  { id: "purroofgroup-public", provider: "purroofgroup", plan: "sv1-default", apr: 18.8, clientShare: 78, displayedYield: 30.92, website: "https://www.purroofgroup.com/" },
-  { id: "easy2stake-public", provider: "Easy2stake", plan: "igniter-1-eu-a", apr: 13.5, clientShare: 50, displayedYield: 22.19, website: "https://www.easy2stake.com/" },
-  { id: "highstakes-public", provider: "High Stakes 🇨🇭", plan: "Public", apr: 0.4, clientShare: 50, displayedYield: 0.7 },
-  { id: "stakeandrelax-public", provider: "Stake&Relax 🦥", plan: "Public stakers", apr: 0.3, clientShare: 49, displayedYield: 0.46 },
-].filter((plan) => plan.apr > MINIMUM_DISPLAY_APR).sort((a, b) => b.apr - a.apr);
 
 function clampWholeNumber(value: number, minimum: number, maximum: number): number {
   if (!Number.isFinite(value)) return minimum;
@@ -48,14 +25,25 @@ function projectedRewards(stakedPokt: number, apr: number, month: number): numbe
   return stakedPokt * (apr / 100) * (month / 12);
 }
 
-export default function StakingDashboard() {
+function formatFetchedAt(value: string): string {
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? "unknown time" : `${date.toISOString().slice(0, 16).replace("T", " ")} UTC`;
+}
+
+type StakingDashboardProps = StakingPlansSnapshot;
+
+export default function StakingDashboard({ plans: publicPlans, fetchedAt, stale, source }: StakingDashboardProps) {
+  const PUBLIC_PLANS = publicPlans;
   const [scenario, setScenario] = useState<Scenario | null>(null);
   const [supplierCount, setSupplierCount] = useState(1);
-  const [currentPlanId, setCurrentPlanId] = useState("easy2stake-public");
-  const [targetPlanId, setTargetPlanId] = useState("kleomedes-public");
+  const [currentPlanId, setCurrentPlanId] = useState(publicPlans.at(-1)?.id ?? "");
+  const [targetPlanId, setTargetPlanId] = useState(publicPlans[0]?.id ?? "");
 
   const currentPlan = PUBLIC_PLANS.find((plan) => plan.id === currentPlanId) ?? PUBLIC_PLANS.at(-1)!;
   const targetPlan = PUBLIC_PLANS.find((plan) => plan.id === targetPlanId) ?? PUBLIC_PLANS[0];
+  if (!currentPlan || !targetPlan) {
+    return <main className="page staking-page"><section className="panel section explorer-empty"><h1 className="section-title">Staking plans are temporarily unavailable.</h1><p className="section-subtitle">Igniter did not return a usable public plan feed. Please try again shortly.</p></section></main>;
+  }
   const stakedPokt = supplierCount * POKT_PER_SUPPLIER;
 
   const projection = useMemo(() => {
@@ -136,14 +124,14 @@ export default function StakingDashboard() {
         <div className="section-title-row">
           <div>
             <span className="eyebrow eyebrow-ghost">Public plan leaderboard</span>
-            <h2 className="section-title">Public provider plan snapshot</h2>
+            <h2 className="section-title">Public provider plans</h2>
             <p className="section-subtitle">
-              Ranked highest to lowest by APR in the {PUBLIC_PLANS_SNAPSHOT_DATE} reference snapshot. <a href="https://staking.pocket.network/app/providers" target="_blank" rel="noreferrer">Verify live plans in Igniter</a> before staking.
+              Ranked highest to lowest based on current trailing 7-day APR. <span className={stale ? "staking-feed-status stale" : "staking-feed-status"}>{stale ? "Last known good" : "Live"} · refreshed {formatFetchedAt(fetchedAt)}</span>
             </p>
           </div>
         </div>
 
-        <div className="staking-plan-table" role="table" aria-label="Public provider plans in a dated reference snapshot">
+        <div className="staking-plan-table" role="table" aria-label="Public provider plans">
           <div className="staking-plan-row header" role="row">
             <span role="columnheader">Rank</span><span role="columnheader">Provider</span><span role="columnheader">Net daily POKT yield per supplier</span><span role="columnheader">Client share</span><span role="columnheader">POKT Staking APR</span>
           </div>
@@ -236,12 +224,12 @@ export default function StakingDashboard() {
             />
           </div>
 
-          <div className="staking-lookback" aria-label="APR lookback: trailing 7 days, reference snapshot">
+          <div className="staking-lookback" aria-label="APR lookback: trailing 7 days">
             <div>
               <span>APR lookback</span>
-              <strong>Trailing 7 days · snapshot</strong>
+              <strong>Trailing 7 days · {source === "igniter" ? "live feed" : "last known good"}</strong>
             </div>
-            <span className="staking-verified-badge">Dated</span>
+            <span className={`staking-verified-badge ${stale ? "stale" : ""}`}>{stale ? "Stale" : "Fresh"}</span>
           </div>
 
           <div className="staking-method-note">

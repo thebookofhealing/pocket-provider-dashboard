@@ -16,6 +16,7 @@ type CalculatorService = {
   revenueUpokt: string;
   providerCount: number;
   supplierCount?: number;
+  eligibleSupplierCount?: number;
   appsStaked?: number;
 };
 
@@ -41,6 +42,7 @@ export default async function RewardsPage() {
     revenueUpokt: service.revenueUpokt.toString(),
     providerCount: service.providerCount,
     supplierCount: service.supplierCount,
+    eligibleSupplierCount: service.eligibleSupplierCount,
     appsStaked: service.appsStaked,
   }));
 

@@ -20,6 +20,8 @@ set_paths
 if [[ -z "$ENV_FILE" ]]; then
   ENV_FILE="${SHARED_DIR}/.env.production"
 fi
+[[ "$HEALTH_URL" == http://127.0.0.1:* ]] || { printf '[deploy] ERROR: HEALTH_URL must be local\n' >&2; exit 1; }
+[[ "$KEEP_RELEASES" =~ ^[1-9][0-9]*$ ]] || { printf '[deploy] ERROR: KEEP_RELEASES must be a positive integer\n' >&2; exit 1; }
 
 log() {
   printf '[deploy] %s\n' "$*"
@@ -45,17 +47,26 @@ atomic_switch() {
 load_runtime_env() {
   local expected_env_file="$ENV_FILE"
   local expected_deploy_root="$DEPLOY_ROOT"
+  local expected_source_root="$SOURCE_ROOT"
+  local expected_health_url="$HEALTH_URL"
+  local expected_keep_releases="$KEEP_RELEASES"
 
   # shellcheck disable=SC1090
   . "$expected_env_file"
   ENV_FILE="$expected_env_file"
   DEPLOY_ROOT="$expected_deploy_root"
+  SOURCE_ROOT="$expected_source_root"
+  HEALTH_URL="$expected_health_url"
+  KEEP_RELEASES="$expected_keep_releases"
   set_paths
 }
 
 export_runtime_env() {
   local expected_env_file="$ENV_FILE"
   local expected_deploy_root="$DEPLOY_ROOT"
+  local expected_source_root="$SOURCE_ROOT"
+  local expected_health_url="$HEALTH_URL"
+  local expected_keep_releases="$KEEP_RELEASES"
 
   set -a
   # shellcheck disable=SC1090
@@ -63,6 +74,9 @@ export_runtime_env() {
   set +a
   ENV_FILE="$expected_env_file"
   DEPLOY_ROOT="$expected_deploy_root"
+  SOURCE_ROOT="$expected_source_root"
+  HEALTH_URL="$expected_health_url"
+  KEEP_RELEASES="$expected_keep_releases"
   set_paths
 }
 
@@ -126,6 +140,9 @@ if [[ -L "$CURRENT_LINK" ]]; then
   previous_release="$(readlink -f "$CURRENT_LINK" || true)"
 fi
 [[ -n "$previous_release" && -d "$previous_release" ]] || fail "no previous known-good release is available"
+previous_realpath="$(realpath -e "$previous_release")"
+[[ "$previous_realpath" == "$releases_realpath"/* ]] || fail "previous release is outside canonical releases"
+previous_release="$previous_realpath"
 
 health_before="$(curl --fail --silent --show-error --max-time 5 "$HEALTH_URL" 2>/dev/null || true)"
 indexed_before="$(HEALTH="$health_before" node -e 'try { const h=JSON.parse(process.env.HEALTH); process.stdout.write(String(Number(h.indexer?.highestIngestedHeight ?? 0))); } catch { process.stdout.write("0"); }')"

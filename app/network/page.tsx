@@ -145,7 +145,10 @@ export default async function NetworkStatusPage() {
             <span className="pill">Indexer</span>
           </div>
           <div className="insight-list">
-            <div className="insight-row"><span className="muted">Request path</span><strong>SQLite snapshots only</strong></div>
+            <div className="insight-row">
+              <span className="muted">Request path</span>
+              <strong>SQLite snapshots; health adds a bounded read-only RPC probe</strong>
+            </div>
             <div className="insight-row"><span className="muted">Live source</span><strong>CometBFT WebSocket + HTTP RPC</strong></div>
             <div className="insight-row"><span className="muted">Repair mode</span><strong>Autonomous retention-window repair</strong></div>
             <div className="insight-row"><span className="muted">Last coverage scan</span><strong>{formatIso(newestScan)}</strong></div>

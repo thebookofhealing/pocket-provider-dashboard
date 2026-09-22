@@ -1,8 +1,11 @@
 import { unstable_cache } from "next/cache";
+import { derivePlanEconomics, isSourceFresh, normalizeSourceTimestamp } from "@/lib/staking-economics";
 
-export const POKT_PER_SUPPLIER = 59_500;
+export const DEFAULT_POKT_PER_SUPPLIER = 59_500;
 export const MINIMUM_DISPLAY_APR = 10;
 const REFRESH_INTERVAL_MS = 15 * 60 * 1000;
+const IGNITER_GRAPHQL_URL = "https://data.pocket.network/";
+const POCKET_REST_URL = "https://sauron-api.infra.pocket.network";
 
 export type PublicPlan = {
   id: string;
@@ -17,130 +20,116 @@ export type PublicPlan = {
 export type StakingPlansSnapshot = {
   plans: PublicPlan[];
   fetchedAt: string;
+  sourceUpdatedAt: string | null;
+  minimumSupplierStake: number;
   stale: boolean;
-  source: "igniter" | "last-known-good";
+  source: "igniter-indexer" | "last-known-good";
 };
 
-type RawPlan = Record<string, unknown>;
+type ProviderPlanMetadata = Omit<PublicPlan, "apr" | "displayedYield"> & { domain: string };
+type RewardRow = { domain?: string | null; day?: string | null; grossRewards?: string | number | null; suppliersCount?: number | null };
 
-// This is only a last-known-good safety net. It is never presented as live and
-// is replaced by the configured Igniter feed whenever that feed is available.
-const LAST_KNOWN_GOOD: PublicPlan[] = [
-  { id: "kleomedes-public", provider: "Kleomedes", plan: "Public", apr: 65.3, clientShare: 49, displayedYield: 107.32, website: "https://kleomedes.cloud" },
-  { id: "kalorius-public", provider: "Kalorius.tech", plan: "public staking", apr: 40.7, clientShare: 20, displayedYield: 66.95, website: "https://kalorius.tech/" },
-  { id: "nodefleet-public", provider: "Nodefleet", plan: "Nodefleet-Public", apr: 28.4, clientShare: 75, displayedYield: 46.64, website: "https://nodefleet.org/" },
-  { id: "purroofgroup-public", provider: "purroofgroup", plan: "sv1-default", apr: 18.8, clientShare: 78, displayedYield: 30.92, website: "https://www.purroofgroup.com/" },
-  { id: "easy2stake-public", provider: "Easy2stake", plan: "igniter-1-eu-a", apr: 13.5, clientShare: 50, displayedYield: 22.19, website: "https://www.easy2stake.com/" }
+// Igniter's public UI does not expose an unauthenticated plan-status endpoint.
+// Keep plan terms explicit, but source reward economics and the protocol minimum
+// stake from the same public Pocket services used by Igniter.
+const PLAN_METADATA: ProviderPlanMetadata[] = [
+  { id: "kleomedes-public", provider: "Kleomedes", plan: "Public", clientShare: 49, domain: "kleomedes.cloud", website: "https://kleomedes.cloud" },
+  { id: "kalorius-public", provider: "Kalorius.tech", plan: "public staking", clientShare: 20, domain: "kalorius.tech", website: "https://kalorius.tech/" },
+  { id: "nodefleet-public", provider: "Nodefleet", plan: "Nodefleet-Public", clientShare: 75, domain: "nodefleet.org", website: "https://nodefleet.org/" },
+  { id: "purroofgroup-public", provider: "purroofgroup", plan: "sv1-default", clientShare: 78, domain: "purroofgroup.com", website: "https://www.purroofgroup.com/" },
+  { id: "easy2stake-public", provider: "Easy2stake", plan: "igniter-1-eu-a", clientShare: 50, domain: "easy2stake.com", website: "https://www.easy2stake.com/" }
 ];
 
-let lastSuccessfulSnapshot: StakingPlansSnapshot | null = null;
+const LAST_KNOWN_GOOD: PublicPlan[] = [
+  { ...PLAN_METADATA[0], apr: 65.3, displayedYield: 107.32 },
+  { ...PLAN_METADATA[1], apr: 40.7, displayedYield: 66.95 },
+  { ...PLAN_METADATA[2], apr: 28.4, displayedYield: 46.64 },
+  { ...PLAN_METADATA[3], apr: 18.8, displayedYield: 30.92 },
+  { ...PLAN_METADATA[4], apr: 13.5, displayedYield: 22.19 }
+].map(({ domain: _domain, ...plan }) => plan);
 
-function number(value: unknown): number | null {
+let lastSuccessfulSnapshot: StakingPlansSnapshot | null = null;
+type GraphQLResponse<T> = { data?: T; errors?: Array<{ message: string }> };
+
+async function fetchGraphQL<T>(query: string, variables?: Record<string, unknown>): Promise<T> {
+  const response = await fetch(IGNITER_GRAPHQL_URL, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ query, variables }), cache: "no-store", signal: AbortSignal.timeout(10_000)
+  });
+  if (!response.ok) throw new Error(`Pocket GraphQL returned ${response.status}`);
+  const body = await response.json() as GraphQLResponse<T>;
+  if (body.errors?.length || !body.data) throw new Error(body.errors?.[0]?.message ?? "Pocket GraphQL returned no data");
+  return body.data;
+}
+
+function toNumber(value: unknown): number | null {
   const parsed = typeof value === "number" ? value : typeof value === "string" ? Number(value) : NaN;
   return Number.isFinite(parsed) ? parsed : null;
 }
 
-function normalizePlan(raw: RawPlan, index: number): PublicPlan | null {
-  const provider = String(raw.provider ?? raw.providerName ?? raw.name ?? "").trim();
-  if (!provider) return null;
-  const plan = String(raw.plan ?? raw.planName ?? raw.addressGroup ?? "Public").trim() || "Public";
-  const serviceRows = Array.isArray(raw.addressGroupServices) ? raw.addressGroupServices.filter((row): row is RawPlan => Boolean(row && typeof row === "object")) : [];
-  const derivedClientShare = serviceRows.length > 0
-    ? serviceRows.reduce((sum, service) => {
-      const providerShare = Array.isArray(service.revShare) ? service.revShare.reduce((inner, share) => inner + (number((share as RawPlan).share) ?? 0), 0) : 0;
-      const supplierShare = service.addSupplierShare ? (number(service.supplierShare) ?? 0) : 0;
-      return sum + Math.max(0, 100 - providerShare - supplierShare - (number(raw.delegatorFee) ?? 0));
-    }, 0) / serviceRows.length
-    : null;
-  const clientShare = number(raw.clientShare ?? raw.client_share ?? raw.delegatorShare) ?? derivedClientShare;
-  const rewardRows = Array.isArray(raw.grossRewardsPerService) ? raw.grossRewardsPerService.filter((row): row is RawPlan => Boolean(row && typeof row === "object")) : [];
-  const grossDailyFromRows = rewardRows.length > 0
-    ? rewardRows.reduce<number | null>((sum, row) => {
-      const amount = number(row.amount);
-      const suppliers = number(row.staked_suppliers ?? raw.rewardsSuppliersCount);
-      if (amount == null || !suppliers || suppliers <= 0) return null;
-      return sum == null ? null : sum + amount / suppliers;
-    }, 0)
-    : null;
-  const grossDaily = number(raw.grossRewardsPerSupplierPerDay ?? raw.grossDailyPokt ?? raw.grossYieldPerSupplier ?? raw.grossRewardsPerSupplier7d)
-    ?? (grossDailyFromRows == null ? null : grossDailyFromRows / 1_000_000 / 7);
-  const netDaily = number(raw.netDailyPokt ?? raw.netPoktPerSupplierPerDay ?? raw.displayedYield ?? raw.yield);
-  const aprValue = number(raw.apr ?? raw.apy);
-  const effectiveClientShare = clientShare == null ? 100 : Math.max(0, Math.min(100, clientShare));
-  const computedNetDaily = netDaily ?? (grossDaily == null ? null : grossDaily * effectiveClientShare / 100);
-  const computedApr = aprValue ?? (computedNetDaily == null ? null : computedNetDaily * 365 / POKT_PER_SUPPLIER * 100);
-  if (computedNetDaily == null || computedApr == null) return null;
+function isoDate(date: Date): string { return date.toISOString().slice(0, 10); }
 
-  return {
-    id: String(raw.id ?? raw.identity ?? `${provider.toLowerCase().replace(/[^a-z0-9]+/g, "-")}-${index}`),
-    provider,
-    plan,
-    apr: computedApr,
-    clientShare: effectiveClientShare,
-    displayedYield: computedNetDaily,
-    website: typeof raw.website === "string" ? raw.website : typeof raw.url === "string" ? raw.url : undefined
-  };
+async function fetchMinimumSupplierStake(): Promise<number> {
+  const response = await fetch(`${POCKET_REST_URL}/pokt-network/poktroll/supplier/params`, { cache: "no-store", signal: AbortSignal.timeout(10_000) });
+  if (!response.ok) throw new Error(`Pocket supplier params returned ${response.status}`);
+  const body = await response.json() as { params?: { min_stake?: { amount?: string | number } } };
+  const upokt = toNumber(body.params?.min_stake?.amount);
+  if (upokt == null || upokt <= 0) throw new Error("Pocket supplier minimum stake is unavailable");
+  return upokt / 1_000_000;
 }
 
-function extractPlans(payload: unknown): PublicPlan[] {
-  const rows = Array.isArray(payload)
-    ? payload
-    : payload && typeof payload === "object"
-      ? ((payload as { plans?: unknown; providers?: unknown; data?: unknown }).plans
-        ?? (payload as { providers?: unknown }).providers
-        ?? (payload as { data?: unknown }).data)
-      : [];
-  if (!Array.isArray(rows)) return [];
-  const expanded = rows.flatMap((row) => {
-    if (!row || typeof row !== "object") return [];
-    const candidate = row as RawPlan;
-    const groups = Array.isArray(candidate.addressGroups) ? candidate.addressGroups : [];
-    if (groups.length === 0) return [candidate];
-    return groups
-      .filter((group): group is RawPlan => Boolean(group && typeof group === "object"))
-      .map((group) => ({ ...candidate, ...group, provider: candidate.provider ?? candidate.name, providerName: candidate.providerName ?? candidate.name }));
-  });
-  return expanded
-    .map((row, index) => normalizePlan(row, index))
-    .filter((plan): plan is PublicPlan => plan !== null)
+async function fetchLivePlans(): Promise<StakingPlansSnapshot> {
+  const now = new Date();
+  const start = new Date(now.getTime() - 6 * 24 * 60 * 60 * 1000);
+  const query = `query($start: Date!, $end: Date!) {
+    status: _metadata { lastProcessedTimestamp }
+    rewards: domainServiceDailyRewards(filter: { day: { greaterThanOrEqualTo: $start, lessThanOrEqualTo: $end } }, first: 5000) {
+      nodes { domain day grossRewards suppliersCount }
+    }
+  }`;
+  const [rewardData, minimumStake] = await Promise.all([
+    fetchGraphQL<{ status?: { lastProcessedTimestamp?: string | null }; rewards?: { nodes?: RewardRow[] } }>(query, { start: isoDate(start), end: isoDate(now) }),
+    fetchMinimumSupplierStake()
+  ]);
+  const rows = rewardData.rewards?.nodes ?? [];
+  if (rows.length === 0) throw new Error("Pocket GraphQL returned no seven-day provider rewards");
+
+  const rewardsByDomain = new Map<string, number>();
+  for (const row of rows) {
+    const domain = row.domain?.toLowerCase().trim();
+    const gross = toNumber(row.grossRewards);
+    const suppliers = toNumber(row.suppliersCount);
+    if (!domain || gross == null || suppliers == null || suppliers <= 0) continue;
+    rewardsByDomain.set(domain, (rewardsByDomain.get(domain) ?? 0) + gross / suppliers);
+  }
+  const sourceUpdatedAt = normalizeSourceTimestamp(rewardData.status?.lastProcessedTimestamp);
+  if (!isSourceFresh(sourceUpdatedAt, now.getTime(), REFRESH_INTERVAL_MS)) throw new Error("Pocket GraphQL reward source is stale");
+
+  const plans = PLAN_METADATA.map((metadata) => {
+    const grossSevenDayPerSupplierUpokt = rewardsByDomain.get(metadata.domain);
+    if (grossSevenDayPerSupplierUpokt == null) return null;
+    const economics = derivePlanEconomics(grossSevenDayPerSupplierUpokt, metadata.clientShare, minimumStake);
+    return { ...metadata, displayedYield: economics.netDailyPokt, apr: economics.apr };
+  }).filter((plan): plan is ProviderPlanMetadata & { displayedYield: number; apr: number } => plan !== null)
     .filter((plan) => plan.apr > MINIMUM_DISPLAY_APR)
-    .sort((a, b) => b.apr - a.apr || a.provider.localeCompare(b.provider));
+    .sort((a, b) => b.apr - a.apr || a.provider.localeCompare(b.provider))
+    .map(({ domain: _domain, ...plan }) => plan);
+  if (plans.length === 0) throw new Error("Pocket GraphQL returned no configured public provider plans");
+
+  return { plans, fetchedAt: now.toISOString(), sourceUpdatedAt, minimumSupplierStake: minimumStake, stale: false, source: "igniter-indexer" };
 }
 
 async function loadStakingPlans(): Promise<StakingPlansSnapshot> {
   const now = Date.now();
-  if (lastSuccessfulSnapshot && now - new Date(lastSuccessfulSnapshot.fetchedAt).getTime() < REFRESH_INTERVAL_MS) {
+  if (lastSuccessfulSnapshot && now - new Date(lastSuccessfulSnapshot.fetchedAt).getTime() < REFRESH_INTERVAL_MS) return lastSuccessfulSnapshot;
+  try {
+    lastSuccessfulSnapshot = await fetchLivePlans();
     return lastSuccessfulSnapshot;
+  } catch {
+    if (lastSuccessfulSnapshot) return { ...lastSuccessfulSnapshot, stale: true, source: "last-known-good" };
+    return { plans: LAST_KNOWN_GOOD, fetchedAt: new Date().toISOString(), sourceUpdatedAt: null, minimumSupplierStake: DEFAULT_POKT_PER_SUPPLIER, stale: true, source: "last-known-good" };
   }
-
-  const endpoint = process.env.IGNITER_PUBLIC_PLANS_URL;
-  if (endpoint) {
-    try {
-      const response = await fetch(endpoint, { cache: "no-store", signal: AbortSignal.timeout(10_000) });
-      if (!response.ok) throw new Error(`Igniter plans feed returned ${response.status}`);
-      const plans = extractPlans(await response.json());
-      if (plans.length > 0) {
-        lastSuccessfulSnapshot = { plans, fetchedAt: new Date().toISOString(), stale: false, source: "igniter" };
-        return lastSuccessfulSnapshot;
-      }
-    } catch {
-      // Keep serving the last-known-good result below. The UI marks it stale.
-    }
-  }
-
-  if (lastSuccessfulSnapshot) {
-    return { ...lastSuccessfulSnapshot, stale: true, source: "last-known-good" };
-  }
-
-  return {
-    plans: LAST_KNOWN_GOOD.filter((plan) => plan.apr > MINIMUM_DISPLAY_APR).sort((a, b) => b.apr - a.apr),
-    fetchedAt: new Date().toISOString(),
-    stale: true,
-    source: "last-known-good"
-  };
 }
 
-export const getStakingPlans = unstable_cache(loadStakingPlans, ["staking-plans"], {
-  revalidate: 15 * 60,
-  tags: ["staking-plans"]
-});
+export const getStakingPlans = unstable_cache(loadStakingPlans, ["staking-plans"], { revalidate: 15 * 60, tags: ["staking-plans"] });
+export const __testing = { fetchLivePlans, loadStakingPlans };

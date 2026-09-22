@@ -32,7 +32,7 @@ function formatFetchedAt(value: string): string {
 
 type StakingDashboardProps = StakingPlansSnapshot;
 
-export default function StakingDashboard({ plans: publicPlans, fetchedAt, stale, source }: StakingDashboardProps) {
+export default function StakingDashboard({ plans: publicPlans, fetchedAt, sourceUpdatedAt, minimumSupplierStake, stale, source }: StakingDashboardProps) {
   const PUBLIC_PLANS = publicPlans;
   const [scenario, setScenario] = useState<Scenario | null>(null);
   const [supplierCount, setSupplierCount] = useState(1);
@@ -44,7 +44,8 @@ export default function StakingDashboard({ plans: publicPlans, fetchedAt, stale,
   if (!currentPlan || !targetPlan) {
     return <main className="page staking-page"><section className="panel section explorer-empty"><h1 className="section-title">Staking plans are temporarily unavailable.</h1><p className="section-subtitle">Igniter did not return a usable public plan feed. Please try again shortly.</p></section></main>;
   }
-  const stakedPokt = supplierCount * POKT_PER_SUPPLIER;
+  const poktPerSupplier = minimumSupplierStake || POKT_PER_SUPPLIER;
+  const stakedPokt = supplierCount * poktPerSupplier;
 
   const projection = useMemo(() => {
     const points = Array.from({ length: PROJECTION_MONTHS }, (_, index) => {
@@ -87,7 +88,7 @@ export default function StakingDashboard({ plans: publicPlans, fetchedAt, stale,
           <span className="eyebrow">Supplier staking</span>
           <h1>Put your POKT to work</h1>
           <p className="section-subtitle">
-            Compare provider staking plans and learn where to maximize your staking rewards
+            Compare provider staking plans and maximize your staking rewards
           </p>
         </div>
         <aside className="hero-side panel panel-inset staking-hero-stat">
@@ -103,7 +104,7 @@ export default function StakingDashboard({ plans: publicPlans, fetchedAt, stale,
                   </svg>
                 </button>
                 <span className="staking-tooltip" id="minimum-stake-tooltip" role="tooltip">
-                  If you hold less than 59,500 POKT, stake with a{" "}
+                  If you hold less than {formatPokt(poktPerSupplier)} POKT, stake with a{" "}
                   <a
                     href="https://wallet.keplr.app/chains/pocket-network?modal=staking&chain=pocket&validator_address=poktvaloper16e5nljedgjfaajcjg9p4a2x4tc78daq9yr56mq&step_id=3&action_id=stake"
                     target="_blank"
@@ -114,7 +115,7 @@ export default function StakingDashboard({ plans: publicPlans, fetchedAt, stale,
                   on Keplr wallet instead.
                 </span>
               </span>
-              <strong>59,500 POKT</strong>
+              <strong>{formatPokt(poktPerSupplier)} POKT</strong>
             </div>
           </div>
         </aside>
@@ -126,14 +127,14 @@ export default function StakingDashboard({ plans: publicPlans, fetchedAt, stale,
             <span className="eyebrow eyebrow-ghost">Public plan leaderboard</span>
             <h2 className="section-title">Public provider plans</h2>
             <p className="section-subtitle">
-              Ranked highest to lowest based on current trailing 7-day APR. <span className={stale ? "staking-feed-status stale" : "staking-feed-status"}>{stale ? "Last known good" : "Live"} · refreshed {formatFetchedAt(fetchedAt)}</span>
+              Ranked highest to lowest based on current trailing 7-day APR. <span className={stale ? "staking-feed-status stale" : "staking-feed-status"}>{stale ? "Last known good" : "Live"} · fetched {formatFetchedAt(fetchedAt)}{sourceUpdatedAt ? ` · source ${formatFetchedAt(sourceUpdatedAt)}` : ""}</span>
             </p>
           </div>
         </div>
 
         <div className="staking-plan-table" role="table" aria-label="Public provider plans">
           <div className="staking-plan-row header" role="row">
-            <span role="columnheader">Rank</span><span role="columnheader">Provider</span><span role="columnheader">Net daily POKT yield per supplier</span><span role="columnheader">Client share</span><span role="columnheader">POKT Staking APR</span>
+            <span role="columnheader">Rank</span><span role="columnheader">Provider</span><span role="columnheader">Daily POKT Yield</span><span role="columnheader">Client share</span><span role="columnheader">Staking APR</span>
           </div>
           {PUBLIC_PLANS.map((plan, index) => (
             <div className={`staking-plan-row ${plan.id === targetPlanId ? "selected" : ""}`} role="row" key={plan.id}>
@@ -227,9 +228,9 @@ export default function StakingDashboard({ plans: publicPlans, fetchedAt, stale,
           <div className="staking-lookback" aria-label="APR lookback: trailing 7 days">
             <div>
               <span>APR lookback</span>
-              <strong>Trailing 7 days · {source === "igniter" ? "live feed" : "last known good"}</strong>
+              <strong>Trailing 7 days · {source === "igniter-indexer" ? "live feed" : "last known good"}</strong>
             </div>
-            <span className={`staking-verified-badge ${stale ? "stale" : ""}`}>{stale ? "Stale" : "Fresh"}</span>
+            <span className={`staking-verified-badge ${stale ? "stale" : ""}`}>{stale ? "Stale" : "Live"}</span>
           </div>
 
           <div className="staking-method-note">
@@ -316,14 +317,14 @@ export default function StakingDashboard({ plans: publicPlans, fetchedAt, stale,
         <ol className="staking-steps">
           <li>Use your Keplr or Soothe wallet to access Igniter via <a href="https://staking.pocket.network" target="_blank" rel="noreferrer">staking.pocket.network</a>.</li>
           <li>Once your wallet is connected, click on <b>Providers</b> to view your staking options.</li>
-          <li>Select your desired provider, click <b>Stake</b> and follow the prompts to set up your supplier.</li>
+            <li>Select your provider, click <b>Stake</b> and follow the prompts to set up your supplier.</li>
         </ol>
 
         <div className="staking-facts">
           <h3>Facts about staking</h3>
           <div className="staking-fact-grid">
             <p><b>Staking is non-custodial:</b> Your tokens stay in your wallet, and only you control them.</p>
-            <p><b>Unstaking Period:</b> Tokens automatically become liquid in your wallet after 21 days.</p>
+            <p><b>Unstaking Period:</b> Tokens become liquid in your wallet after 21 days.</p>
             <p><b>Automatic rewards:</b> Rewards flow directly to the wallet you staked from—no claiming required.</p>
             <p><b>Track rewards:</b> View your staking rewards in Igniter’s <b>Overview</b> tab.</p>
           </div>

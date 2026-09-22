@@ -49,6 +49,7 @@ export type ServiceStats = {
   /** Currently eligible on-chain suppliers, refreshed independently of rewards. */
   eligibleSupplierCount?: number;
   eligibleSupplierCountFetchedAt?: string;
+  eligibleSupplierCountStale?: boolean;
   appsStaked?: number;
   revenueUpokt: bigint;
   providerCount: number;

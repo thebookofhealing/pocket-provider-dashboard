@@ -8,5 +8,5 @@ export const metadata = {
 
 export default async function StakingPage() {
   const plans = await getStakingPlans();
-  return <StakingDashboard plans={plans.plans} fetchedAt={plans.fetchedAt} stale={plans.stale} source={plans.source} />;
+  return <StakingDashboard {...plans} />;
 }

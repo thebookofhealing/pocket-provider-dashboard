@@ -45,6 +45,7 @@ import {
   updateGraphQLWatermark
 } from "@/lib/graphql";
 import { DEFAULT_RPC_URLS } from "@/lib/rpc-status";
+import { isEligibleSupplierSnapshotFresh, type EligibleSupplierSnapshot } from "@/lib/eligible-suppliers";
 
 type RpcEvent = {
   type: string;
@@ -91,6 +92,7 @@ type RestSuppliersResponse = {
   supplier?: Array<{
     operator_address: string;
     services?: Array<{
+      service_id?: string;
       endpoints?: Array<{ url?: string | null }>;
     }>;
   }>;
@@ -147,6 +149,9 @@ type SerializedDashboardCache = {
     computeUnits?: number;
     computeUnitsPerRelay?: number;
     supplierCount?: number;
+    eligibleSupplierCount?: number;
+    eligibleSupplierCountFetchedAt?: string;
+    eligibleSupplierCountStale?: boolean;
     appsStaked?: number;
     revenueUpokt: string;
     providerCount: number;
@@ -602,6 +607,55 @@ async function syncSupplierDomains(): Promise<void> {
   }
 }
 
+function readEligibleSupplierSnapshot(): EligibleSupplierSnapshot | null {
+  const raw = getIndexerState("eligible_supplier_counts");
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw) as Partial<EligibleSupplierSnapshot>;
+    if (!parsed.counts || typeof parsed.counts !== "object" || typeof parsed.fetchedAt !== "string") return null;
+    return { counts: parsed.counts as Record<string, number>, fetchedAt: parsed.fetchedAt };
+  } catch {
+    return null;
+  }
+}
+
+async function syncEligibleSupplierCounts(): Promise<{ snapshot: EligibleSupplierSnapshot | null; stale: boolean }> {
+  const cached = readEligibleSupplierSnapshot();
+  if (cached && isEligibleSupplierSnapshotFresh(cached, Date.now())) {
+    return { snapshot: cached, stale: false };
+  }
+
+  const countsByService = new Map<string, Set<string>>();
+  let nextKey = "";
+  try {
+    while (true) {
+      const search = new URLSearchParams({ dehydrated: "false", "pagination.limit": "250" });
+      if (nextKey) search.set("pagination.key", nextKey);
+      const response = await fetchJson<RestSuppliersResponse>(`${REST_URL.replace(/\/$/, "")}/pokt-network/poktroll/supplier/supplier?${search.toString()}`);
+      for (const supplier of response.supplier ?? []) {
+        if (!supplier.operator_address) continue;
+        for (const service of supplier.services ?? []) {
+          if (!service.service_id) continue;
+          const operators = countsByService.get(service.service_id) ?? new Set<string>();
+          operators.add(supplier.operator_address);
+          countsByService.set(service.service_id, operators);
+        }
+      }
+      nextKey = response.pagination?.next_key ?? "";
+      if (!nextKey) break;
+    }
+
+    const counts = Object.fromEntries(Array.from(countsByService.entries()).map(([serviceId, operators]) => [serviceId, operators.size]));
+    const snapshot = { counts, fetchedAt: new Date().toISOString() } satisfies EligibleSupplierSnapshot;
+    setIndexerState("eligible_supplier_counts", JSON.stringify(snapshot));
+    logInfo("Eligible supplier counts published", { serviceCount: Object.keys(counts).length, fetchedAt: snapshot.fetchedAt });
+    return { snapshot, stale: false };
+  } catch (error) {
+    logWarn("Eligible supplier count refresh failed; retaining last-known snapshot", { error: error instanceof Error ? error.message : String(error) });
+    return { snapshot: cached, stale: true };
+  }
+}
+
 let sessionSyncedAppsStaked: Record<string, number> | null = null;
 let sessionSyncedSlots: number | null = null;
 let sessionSyncedHeight: number | null = null;
@@ -888,6 +942,7 @@ export async function rebuildIndexerCaches(): Promise<void> {
     const latestSeenHeight = Number(getIndexerState("highest_seen_height") ?? latestHeight);
     const latestFact = getLatestIndexedFact();
     const poktPriceUsd = await refreshPrice();
+    const eligibleSupplierSnapshot = await syncEligibleSupplierCounts();
     const liveSuppliersPerSession = sessionSyncedSlots ?? SESSION_SUPPLIER_SLOTS;
     const liveAppsStaked = sessionSyncedAppsStaked ?? {};
     const oldestFetchedAt = [sessionSuppliersFetchedAt, sessionAppsFetchedAt]
@@ -924,6 +979,9 @@ export async function rebuildIndexerCaches(): Promise<void> {
         computeUnits: migrationComplete ? (row.estimated_compute_units ?? undefined) : undefined,
         computeUnitsPerRelay: migrationComplete ? (row.compute_units_per_relay ?? undefined) : undefined,
         supplierCount: row.supplier_count,
+        eligibleSupplierCount: eligibleSupplierSnapshot.snapshot?.counts[row.service_id],
+        eligibleSupplierCountFetchedAt: eligibleSupplierSnapshot.snapshot?.fetchedAt,
+        eligibleSupplierCountStale: eligibleSupplierSnapshot.stale,
         appsStaked: liveAppsStaked[row.service_id] ?? undefined,
         revenueUpokt: row.revenue_upokt,
         providerCount: row.provider_count

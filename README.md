@@ -241,7 +241,7 @@ This keeps the public demo responsive and reduces repeated network fetches.
 
 ### Live staking plan feed
 
-The staking leaderboard is server-rendered from `IGNITER_PUBLIC_PLANS_URL` and refreshed every 15 minutes. The endpoint must return either an array of plans or an object containing `plans`/`providers`; each row should include provider identity, client share, and either trailing-seven-day gross yield per supplier or the resulting net daily yield/APR. The server derives net yield and APR from the supplied seven-day economics, filters plans below 10% APR, and never fetches the feed from the browser. If the feed is unavailable, the last-known-good result is retained and the page marks it stale rather than presenting it as live.
+The staking leaderboard is server-rendered from Pocket's public GraphQL indexer (`https://data.pocket.network/`) plus the live supplier minimum-stake parameter and refreshed every 15 minutes. The server derives net daily yield and APR from seven-day gross rewards and explicit public-plan client-share metadata, filters plans below 10% APR, and never fetches economics from the browser. If either source is unavailable or its source timestamp is older than 15 minutes, the last-known-good result is retained and the page marks it stale rather than presenting it as live.
 
 ## Repository Context
 

@@ -1,6 +1,6 @@
 import { cache } from "react";
 
-import { finishJobRun, getCachedSettlementBlocks, getDashboardCache, getMeta, isDatabaseReadOnly, saveSettlementBlock, setDashboardCache, setMeta, startJobRun } from "@/lib/db";
+import { finishJobRun, getCachedSettlementBlocks, getDashboardCache, getIndexerState, getMeta, isDatabaseReadOnly, saveSettlementBlock, setDashboardCache, setMeta, startJobRun } from "@/lib/db";
 import { getDevelopmentDashboardData, getDevelopmentNetworkDailyHistory, getDevelopmentServiceDailyHistory, isDevelopmentDummyDataEnabled } from "@/lib/dev-fixtures";
 import { SESSION_SUPPLIER_SLOTS } from "@/lib/opportunities";
 import { PROVIDER_DOMAIN_LABEL_OVERRIDES, SUPPLIER_PROVIDER_OVERRIDES } from "@/lib/provider-overrides";
@@ -1370,39 +1370,35 @@ const getServiceSupplierCounts = async (): Promise<ServiceSupplierCounts> => {
   if (serviceSupplierCountsCache && Date.now() - new Date(serviceSupplierCountsCache.fetchedAt).getTime() < SERVICE_SUPPLIER_COUNTS_TTL_MS) {
     return serviceSupplierCountsCache.value;
   }
-  const counts: ServiceSupplierCounts = {};
-  let nextKey = "";
-
-  while (true) {
-    const search = new URLSearchParams({
-      dehydrated: "false",
-      "pagination.limit": "200"
-    });
-
-    if (nextKey) {
-      search.set("pagination.key", nextKey);
-    }
-
-    const response = await fetchJson<SuppliersResponse>(`${DEFAULT_REST_URL}${SUPPLIERS_PATH}?${search.toString()}`);
-
-    for (const supplier of response.supplier ?? []) {
-      const activeServiceIds = new Set(
-        (supplier.services ?? [])
-          .map((service) => service.service_id)
-          .filter((serviceId): serviceId is string => Boolean(serviceId))
-      );
-
-      for (const serviceId of activeServiceIds) {
-        counts[serviceId] = (counts[serviceId] ?? 0) + 1;
+  try {
+    const counts: ServiceSupplierCounts = {};
+    let nextKey = "";
+    while (true) {
+      const search = new URLSearchParams({ dehydrated: "false", "pagination.limit": "200" });
+      if (nextKey) search.set("pagination.key", nextKey);
+      const response = await fetchJson<SuppliersResponse>(`${DEFAULT_REST_URL}${SUPPLIERS_PATH}?${search.toString()}`);
+      for (const supplier of response.supplier ?? []) {
+        const activeServiceIds = new Set((supplier.services ?? []).map((service) => service.service_id).filter((serviceId): serviceId is string => Boolean(serviceId)));
+        for (const serviceId of activeServiceIds) counts[serviceId] = (counts[serviceId] ?? 0) + 1;
       }
+      nextKey = response.pagination?.next_key ?? "";
+      if (!nextKey) break;
     }
-
-    nextKey = response.pagination?.next_key ?? "";
-    if (!nextKey) break;
+    serviceSupplierCountsCache = { value: counts, fetchedAt: new Date().toISOString() };
+    return counts;
+  } catch (error) {
+    const persisted = getIndexerState("eligible_supplier_counts");
+    if (persisted) {
+      try {
+        const parsed = JSON.parse(persisted) as { counts?: ServiceSupplierCounts; fetchedAt?: string };
+        if (parsed.counts && parsed.fetchedAt) {
+          serviceSupplierCountsCache = { value: parsed.counts, fetchedAt: parsed.fetchedAt };
+          return parsed.counts;
+        }
+      } catch { /* fall through to the original error */ }
+    }
+    throw error;
   }
-
-  serviceSupplierCountsCache = { value: counts, fetchedAt: new Date().toISOString() };
-  return counts;
 };
 
 const getPoktscanSupplierDirectory = cache(async (): Promise<SupplierDirectory> => {

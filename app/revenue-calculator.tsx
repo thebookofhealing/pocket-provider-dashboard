@@ -18,6 +18,8 @@ type CalculatorService = {
   providerCount: number;
   supplierCount?: number;
   eligibleSupplierCount?: number;
+  eligibleSupplierCountFetchedAt?: string;
+  eligibleSupplierCountStale?: boolean;
   appsStaked?: number;
 };
 
@@ -60,6 +62,8 @@ export default function RevenueCalculator({ services, suppliersPerSession, sessi
     const selected = new Set(selectedIds);
     return eligibleServices.filter((service) => selected.has(service.serviceId));
   }, [eligibleServices, selectedIds]);
+  const eligibleCountsReady = selectedServices.length > 0 && selectedServices.every((service) => service.eligibleSupplierCount != null && !service.eligibleSupplierCountStale);
+  const eligibleCountFetchedAt = selectedServices.map((service) => service.eligibleSupplierCountFetchedAt).filter((value): value is string => Boolean(value)).sort()[0];
 
   const supplierAllocation = useMemo(() => {
     return allocateSuppliersByMarginalReturn(selectedServices, supplierCount);
@@ -105,7 +109,7 @@ export default function RevenueCalculator({ services, suppliersPerSession, sessi
         <div>
           <h2 className="section-title">Growth Simulator</h2>
           <p className="section-subtitle">
-            Model your potential revenue by using this calculator to determine your best expansion opportunities.
+            Use this calculator to model your potential revenue and determine your best expansion opportunities.
           </p>
         </div>
       </div>
@@ -119,6 +123,16 @@ export default function RevenueCalculator({ services, suppliersPerSession, sessi
               <p style={{ fontSize: '0.9rem' }}>
                 Pocket Network Foundation provides <strong>15 free suppliers</strong> to bootstrap new providers. 
                 Our model assumes <strong>{liveSuppliersPerSession} slots</strong> per session.
+                {!eligibleCountsReady && (
+                  <em className="muted" style={{ display: 'block', marginTop: '8px' }}>
+                    Current eligible supplier counts are unavailable or stale; selection odds and projected rewards are unavailable until the indexer refreshes them.
+                  </em>
+                )}
+                {eligibleCountsReady && eligibleCountFetchedAt && (
+                  <em className="muted" style={{ display: 'block', marginTop: '8px' }}>
+                    Eligible supplier counts refreshed at {eligibleCountFetchedAt}.
+                  </em>
+                )}
                 {sessionStale && (
                   <em className="muted" style={{ display: 'block', marginTop: '8px' }}>
                     Session parameters are stale; last-known snapshot{sessionFetchedAt ? ` from ${sessionFetchedAt}` : ""} is in use.
@@ -150,7 +164,7 @@ export default function RevenueCalculator({ services, suppliersPerSession, sessi
             <article className="calculator-kpi-card calculator-kpi-card-accent" style={{ background: 'linear-gradient(135deg, rgba(0, 194, 255, 0.05) 0%, transparent 100%)', borderColor: 'var(--cyan-accent)' }}>
               <span className="kpi-label" style={{ color: 'var(--cyan-accent)' }}>Projected Monthly Rewards</span>
               <strong className="calculator-kpi-value accent-number" style={{ color: 'var(--cyan-accent)', textShadow: '0 0 20px rgba(0, 194, 255, 0.2)' }}>
-                {formatUpokt(projectedEntryUpokt, 1)}
+                {eligibleCountsReady ? formatUpokt(projectedEntryUpokt, 1) : "Unavailable"}
               </strong>
             </article>
           </div>
@@ -176,24 +190,24 @@ export default function RevenueCalculator({ services, suppliersPerSession, sessi
             </div>
 
             <div className="calculator-meta-card">
-              <span className="hero-highlight-label">Supplier</span>
-              <strong className="accent-number" style={{ color: 'var(--green)' }}>{formatUpokt(entryPerSupplierUpokt, 1)}</strong>
+              <span className="hero-highlight-label">Projected revenue per supplier</span>
+              <strong className="accent-number" style={{ color: 'var(--green)' }}>{eligibleCountsReady ? formatUpokt(entryPerSupplierUpokt, 1) : "Unavailable"}</strong>
               <p>Projected revenue per active supplier.</p>
             </div>
 
             <div className="calculator-meta-card">
               <span className="hero-highlight-label">Selection Odds</span>
-              <strong className="accent-number" style={{ color: 'var(--accent)' }}>{formatDecimal(averageSelectionProbability, 0)}%</strong>
+              <strong className="accent-number" style={{ color: 'var(--accent)' }}>{eligibleCountsReady ? `${formatDecimal(averageSelectionProbability, 0)}%` : "Unavailable"}</strong>
               <p>Averaged across selected chains.</p>
             </div>
 
             <div className="calculator-meta-card calculator-quick-facts">
               <span className="hero-highlight-label">Quick Facts</span>
               <ul>
-                <li>Pocket subsidizes the first 15 suppliers for new providers.</li>
-                <li>Suppliers are selected independently for every session.</li>
-                <li>More suppliers improve coverage odds, not guaranteed demand.</li>
-                <li>Actual rewards vary with relays, service mix, and uptime.</li>
+                <li>Projections are based on the number of suppliers per chain and historical rewards data, therefore it is not a guarantee of future rewards.</li>
+                <li>Calculator assumes your suppliers are distributed across all selected chains to maximize yield.</li>
+                <li>If you are a new provider, the foundation may supply you with more or less than 15 suppliers.</li>
+                <li>Supplier selection is protocol-driven, but gateway QoS/routing can influence how much traffic selected suppliers actually receive and therefore can affect realized earnings.</li>
               </ul>
             </div>
           </div>
@@ -238,7 +252,7 @@ export default function RevenueCalculator({ services, suppliersPerSession, sessi
                     <div className="calculator-item-meta">
                       <span style={{ color: 'var(--accent)' }}>{formatUpokt(BigInt(service.revenueUpokt), 1)}</span>
                       <span>{formatInteger(service.providerCount)} providers</span>
-                      <span>{formatInteger(service.eligibleSupplierCount ?? service.supplierCount ?? 0)} eligible suppliers</span>
+                      <span>{service.eligibleSupplierCount == null ? "Eligible count unavailable" : `${formatInteger(service.eligibleSupplierCount)} eligible suppliers`}</span>
                       <span>{formatCompactNumber(service.relays)} relays</span>
                     </div>
                   </div>

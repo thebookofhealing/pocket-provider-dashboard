@@ -666,7 +666,7 @@ const selectProviderAggregatesStatement = db.prepare(
     LEFT JOIN supplier_domain_dim ON supplier_domain_dim.supplier_hash = settlement_facts.supplier_hash
     WHERE settlement_facts.block_time >= ?
     GROUP BY COALESCE(supplier_domain_dim.domain_hash, settlement_facts.owner_hash, settlement_facts.supplier_hash)
-    HAVING relays > 0 OR CAST(revenue_upokt AS INTEGER) > 0
+    HAVING SUM(settlement_facts.relays) > 0
     ORDER BY CAST(revenue_upokt AS INTEGER) DESC, relays DESC
   `
 );

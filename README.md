@@ -117,8 +117,23 @@ npm run indexer
 With PM2:
 
 ```bash
-pm2 start npm --name pocket-dashboard -- run start
-pm2 start npm --name pocket-indexer -- run indexer
+pm2 start ecosystem.config.cjs
+pm2 save
+```
+
+The checked-in PM2 configuration supervises both required production processes with automatic restart. Verify both are online after every deployment:
+
+```bash
+pm2 status
+pm2 logs pocket-indexer --lines 100
+curl -fsS http://127.0.0.1:3100/api/health
+```
+
+If `/api/health` reports `status: "stale"`, restart the indexer and confirm that `highestIngestedHeight` and `freshnessTimestamp` advance:
+
+```bash
+pm2 restart pocket-indexer
+pm2 logs pocket-indexer --lines 100
 ```
 
 The indexer owns all Pocket RPC/WebSocket requests and writes dashboard snapshots to SQLite. The Next.js request path does not call Pocket RPC or Poktscan directly. Production `npm run indexer` is live-first: it opens the WebSocket immediately, runs bounded live catchup in the background, and lets the repair loop fill historical gaps without blocking current-height sync. `npm run indexer:backfill` remains available for manual/debug runs, but production should normally only run `npm run indexer`.
@@ -182,6 +197,7 @@ Indexer environment variables:
 - `POCKET_INDEXER_REPAIR_FAILED_COOLDOWN_MS` defaults to `300000`
 - `POCKET_INDEXER_REPAIR_MAX_FAILED_RETRIES` defaults to `10`
 - `POCKET_INDEXER_LIVE_CATCHUP_MAX_BLOCKS` defaults to `1000`; live mode skips stale checkpoints with larger gaps instead of replaying history
+- `POCKET_INDEXER_STALE_AFTER_MS` defaults to `900000` (15 minutes); the health endpoint reports stale data after this interval
 - `POCKET_INDEXER_HASH_SALT` salt for privacy-preserving supplier/operator hashes
 - `POCKET_UI_MEMORY_CACHE_MS` defaults to `30000`
 

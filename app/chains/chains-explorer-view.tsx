@@ -20,9 +20,9 @@ type SortColumn = {
 
 const SORT_COLUMNS: SortColumn[] = [
   { key: "service", label: "Service Identity", defaultDirection: "asc" },
-  { key: "revenue", label: "Revenue (30d)", align: "right" },
-  { key: "relays", label: "Final Relays", align: "right" },
-  { key: "providers", label: "Domains", align: "right" },
+  { key: "revenue", label: "Revenue", align: "right" },
+  { key: "relays", label: "Relay Count", align: "right" },
+  { key: "providers", label: "Providers", align: "right" },
   { key: "suppliers", label: "Suppliers", align: "right" },
   { key: "appsStaked", label: "Apps", align: "right", tooltip: "Applications staked for this service (live snapshot). Auxiliary metric — does not affect the demand signal ranking." },
   { key: "revenuePerProvider", label: "Avg Domain Reward", align: "right" },
@@ -37,6 +37,17 @@ const SORT_COLUMNS: SortColumn[] = [
 type ChainsExplorerViewProps = {
   data: SerializedDashboardData | null;
 };
+
+type IndexerHealthResponse = {
+  indexer?: {
+    lag?: number | null;
+    stale?: boolean;
+    lagReliable?: boolean;
+  };
+};
+
+const INDEXER_SYNC_LAG_THRESHOLD = 15;
+const INDEXER_HEALTH_REFRESH_MS = 30_000;
 
 function toPoktNumber(value: string): number {
   return Number(BigInt(value)) / 1_000_000;
@@ -98,6 +109,12 @@ export default function ChainsExplorerView({ data }: ChainsExplorerViewProps) {
   const [query, setQuery] = useState("");
   const [sort, setSort] = useState<SortKey>("revenue");
   const [sortDirection, setSortDirection] = useState<SortDirection>("desc");
+  const [indexerLag, setIndexerLag] = useState<number | null>(() =>
+    data?.indexerTargetHeight != null && data.indexerProcessedHeight != null
+      ? Math.max(0, data.indexerTargetHeight - data.indexerProcessedHeight)
+      : null
+  );
+  const [healthReportsStale, setHealthReportsStale] = useState(true);
 
   function updateSort(nextSort: SortKey, nextDirection?: SortDirection) {
     if (nextDirection) {
@@ -144,6 +161,36 @@ export default function ChainsExplorerView({ data }: ChainsExplorerViewProps) {
 
   useEffect(() => { setPage(1); }, [query, sort, sortDirection, eligibleServices.length]);
 
+  useEffect(() => {
+    let active = true;
+
+    async function refreshIndexerHealth() {
+      try {
+        const response = await fetch("/api/health", { cache: "no-store" });
+        if (!response.ok) throw new Error("Indexer health request failed");
+
+        const health = (await response.json()) as IndexerHealthResponse;
+        const lag = health.indexer?.lag;
+        if (!active) return;
+
+        setIndexerLag(typeof lag === "number" && Number.isFinite(lag) ? Math.max(0, lag) : null);
+        setHealthReportsStale(health.indexer?.stale === true || health.indexer?.lagReliable !== true);
+      } catch {
+        if (!active) return;
+        setIndexerLag(null);
+        setHealthReportsStale(true);
+      }
+    }
+
+    void refreshIndexerHealth();
+    const refreshId = globalThis.setInterval(refreshIndexerHealth, INDEXER_HEALTH_REFRESH_MS);
+
+    return () => {
+      active = false;
+      globalThis.clearInterval(refreshId);
+    };
+  }, []);
+
   if (!data) {
     return (
       <main className="page">
@@ -157,10 +204,11 @@ export default function ChainsExplorerView({ data }: ChainsExplorerViewProps) {
   }
 
   const cuCoverageComplete = (data.computeUnitCoverage ?? 0) >= 1;
+  const indexerSynced = indexerLag != null && indexerLag < INDEXER_SYNC_LAG_THRESHOLD && !healthReportsStale;
 
   return (
     <main className="page explorer-page">
-      <section className="panel section explorer-hero" style={{ overflow: 'hidden', position: 'relative' }}>
+      <section className="panel section explorer-hero chains-explorer-hero" style={{ overflow: 'hidden', position: 'relative' }}>
         <div style={{ 
           position: 'absolute', 
           top: '-10%', 
@@ -172,28 +220,28 @@ export default function ChainsExplorerView({ data }: ChainsExplorerViewProps) {
         }} />
 
         <div>
-          <span className="eyebrow">Chains</span>
-          <h1>Chain Explorer.</h1>
-          <p className="section-subtitle" style={{ fontSize: '1.1rem', maxWidth: '600px' }}>
-            Search, sort, and open service-level chain details from a dedicated explorer.
-            {data.sessionStale && <em className="muted"> Session parameters are stale; opportunity scores use last-known values{data.sessionFetchedAt ? ` from ${data.sessionFetchedAt}` : ""}.</em>}
-          </p>
+          <h1>Pocket Chain Explorer</h1>
+          {data.sessionStale && (
+            <p className="section-subtitle" style={{ fontSize: '1.1rem', maxWidth: '600px' }}>
+              <em className="muted">Session parameters are stale; opportunity scores use last-known values{data.sessionFetchedAt ? ` from ${data.sessionFetchedAt}` : ""}.</em>
+            </p>
+          )}
         </div>
         
         <div className="explorer-summary-grid explorer-summary-grid-four">
-          <article className="explorer-summary-card panel-inset" style={{ border: '1px solid var(--border)', borderRadius: 'var(--radius-md)' }}>
+          <article className="explorer-summary-card chains-summary-card panel-inset">
             <span className="hero-highlight-label">Active Chains</span>
             <strong style={{ color: 'var(--text)' }}>{formatInteger(data.activeChains)}</strong>
           </article>
-          <article className="explorer-summary-card panel-inset" style={{ border: '1px solid var(--border)', borderRadius: 'var(--radius-md)' }}>
+          <article className="explorer-summary-card chains-summary-card panel-inset">
             <span className="hero-highlight-label">Reward Pool</span>
             <strong style={{ color: 'var(--accent)' }}>{formatCompactUpokt(BigInt(data.totalRevenueUpokt), 1)}</strong>
           </article>
-          <article className="explorer-summary-card panel-inset" style={{ border: '1px solid var(--border)', borderRadius: 'var(--radius-md)' }}>
+          <article className="explorer-summary-card chains-summary-card panel-inset">
             <span className="hero-highlight-label">Relays</span>
             <strong style={{ color: 'var(--green)' }}>{formatCompactNumber(data.totalRelays)}</strong>
           </article>
-          <article className="explorer-summary-card panel-inset" style={{ border: '1px solid var(--border)', borderRadius: 'var(--radius-md)' }}>
+          <article className="explorer-summary-card chains-summary-card panel-inset">
             <span className="hero-highlight-label">{cuCoverageComplete ? "Compute Units" : "Known Compute Units"}</span>
             <strong style={{ color: 'var(--green)' }}>{formatCompactNumber(data.totalEstimatedComputeUnits)}</strong>
             {!cuCoverageComplete && <span className="muted" style={{ fontSize: '0.7rem' }}>Partial</span>}
@@ -204,10 +252,16 @@ export default function ChainsExplorerView({ data }: ChainsExplorerViewProps) {
       <section className="panel section">
         <div className="section-title-row">
           <div>
-            <h2 className="section-title">Chains</h2>
-            <p className="section-subtitle">Clickable and filterable list of services in the current 30d snapshot.</p>
+            <h2 className="section-title">Search, sort and analyze traffic across chains to identify the best revenue opportunities</h2>
+            <p className="section-subtitle">Data represents the last 30 days of on-chain activity</p>
           </div>
-          <span className="pill">Explorer</span>
+          <span
+            className={`pill indexer-status-pill ${indexerSynced ? "is-synced" : "is-stale"}`}
+            aria-live="polite"
+            title={indexerLag == null ? "Indexer lag is unavailable" : `Indexer lag: ${formatInteger(indexerLag)} blocks`}
+          >
+            {indexerSynced ? "Synced to Latest Block Height" : "Stale Data"}
+          </span>
         </div>
 
         <div className="explorer-toolbar">
@@ -322,15 +376,15 @@ export default function ChainsExplorerView({ data }: ChainsExplorerViewProps) {
         <div className="explorer-pagination">
           <span className="muted">Showing {(page - 1) * pageSize + 1}–{Math.min(page * pageSize, eligibleServices.length)} of {formatInteger(eligibleServices.length)} chains</span>
           <div className="explorer-pagination-controls">
-            <span className="muted" style={{ marginRight: '12px' }}>Rows per page:</span>
-            {PAGE_SIZE_OPTIONS.map((size) => (
-              <button key={size} type="button" className={`pill ${pageSize === size ? 'active' : ''}`} onClick={() => handlePageSizeChange(size)}>
-                {size}
-              </button>
-            ))}
             <button type="button" className="pill" disabled={page <= 1} onClick={() => setPage((p) => Math.max(1, p - 1))}>Previous</button>
             <span className="muted" style={{ margin: '0 8px' }}>Page {page} of {pageCount}</span>
             <button type="button" className="pill" disabled={page >= pageCount} onClick={() => setPage((p) => Math.min(pageCount, p + 1))}>Next</button>
+            <label className="explorer-page-size">
+              <span>Rows per page</span>
+              <select value={pageSize} onChange={(event) => handlePageSizeChange(Number(event.target.value))}>
+                {PAGE_SIZE_OPTIONS.map((size) => <option key={size} value={size}>{size}</option>)}
+              </select>
+            </label>
           </div>
         </div>
       </section>

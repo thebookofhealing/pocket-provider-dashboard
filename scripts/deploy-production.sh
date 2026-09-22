@@ -11,6 +11,8 @@ ENV_FILE="${ENV_FILE:-${SHARED_DIR}/.env.production}"
 KEEP_RELEASES="${KEEP_RELEASES:-5}"
 HEALTH_URL="${HEALTH_URL:-http://127.0.0.1:3100/api/health}"
 
+[[ "$DEPLOY_ROOT" = /* ]] || { printf '[deploy] ERROR: DEPLOY_ROOT must be absolute\n' >&2; exit 1; }
+
 log() {
   printf '[deploy] %s\n' "$*"
 }
@@ -65,6 +67,7 @@ if (( node_major < 22 )); then
 fi
 
 [[ -f "$ENV_FILE" ]] || fail "missing production environment file: $ENV_FILE"
+[[ "$ENV_FILE" = /* ]] || fail "ENV_FILE must be absolute"
 load_runtime_env
 
 [[ -n "${POCKET_SQLITE_PATH:-}" ]] || fail "POCKET_SQLITE_PATH must be set in $ENV_FILE"
@@ -77,6 +80,7 @@ releases_realpath="$(realpath -m "$RELEASES_DIR")"
 [[ "$db_realpath" != "$releases_realpath"/* ]] || fail "canonical SQLite database resolves inside releases"
 
 POCKET_BACKUP_DIR="${POCKET_BACKUP_DIR:-/var/backups/pocket-dashboard}"
+[[ "$POCKET_BACKUP_DIR" = /* ]] || fail "POCKET_BACKUP_DIR must be absolute"
 [[ -d "$POCKET_BACKUP_DIR" && -w "$POCKET_BACKUP_DIR" ]] || fail "backup directory is not writable"
 backup_realpath="$(realpath -e "$POCKET_BACKUP_DIR")"
 [[ "$backup_realpath" != "$releases_realpath"/* ]] || fail "backup directory resolves inside releases"
@@ -100,6 +104,10 @@ if [[ -L "$CURRENT_LINK" ]]; then
   previous_release="$(readlink -f "$CURRENT_LINK" || true)"
 fi
 [[ -n "$previous_release" && -d "$previous_release" ]] || fail "no previous known-good release is available"
+
+health_before="$(curl --fail --silent --show-error --max-time 5 "$HEALTH_URL" 2>/dev/null || true)"
+indexed_before="$(HEALTH="$health_before" node -e 'try { const h=JSON.parse(process.env.HEALTH); process.stdout.write(String(Number(h.indexer?.highestIngestedHeight ?? 0))); } catch { process.stdout.write("0"); }')"
+indexer_snapshot_before="$(pm2 jlist | node -e 'let s=""; process.stdin.on("data", d => s += d).on("end", () => { const a=JSON.parse(s).find(x => x.name === "pocket-indexer"); process.stdout.write(a ? `${a.pm2_env?.status ?? "unknown"}:${a.pm2_env?.restart_time ?? -1}` : "absent:-1"); });')"
 
 activated=0
 
@@ -170,24 +178,43 @@ pm2 startOrReload "$CURRENT_LINK/ecosystem.config.cjs" --update-env
 
 log "verifying web and indexer"
 healthy=0
-health_before="$(curl --fail --silent --show-error --max-time 5 "$HEALTH_URL")"
-indexer_restarts_before="$(pm2 jlist | node -e 'let s=""; process.stdin.on("data", d => s += d).on("end", () => { const a=JSON.parse(s).find(x => x.name === "pocket-indexer"); process.stdout.write(String(a?.pm2_env?.restart_time ?? -1)); });')"
+valid_samples=0
+first_indexed_after=0
+last_indexed_after=0
+snapshot="absent:-1"
+first_restart_after="-1"
 for _ in $(seq 1 30); do
   health_after="$(curl --fail --silent --show-error --max-time 5 "$HEALTH_URL")" || health_after=""
-  if [[ -n "$health_after" ]] \
-    && curl --fail --silent --show-error --max-time 5 http://127.0.0.1:3100/ >/dev/null \
-    && [[ -n "$(pm2 pid pocket-dashboard)" ]] \
-    && [[ -n "$(pm2 pid pocket-indexer)" ]] \
-    && HEALTH="$health_after" node -e 'const h=JSON.parse(process.env.HEALTH); const i=h.indexer; if (!i || i.isLocked !== true || !Number.isFinite(Number(i.highestIngestedHeight)) || !Number.isFinite(Number(i.contiguousHeight))) process.exit(1);' \
-    && [[ "$(pm2 jlist | node -e 'let s=""; process.stdin.on("data", d => s += d).on("end", () => { const a=JSON.parse(s).find(x => x.name === "pocket-indexer"); process.stdout.write(String(a?.pm2_env?.restart_time ?? -1)); });')" == "$indexer_restarts_before" ]]; then
-    healthy=1
-    break
+  if [[ -n "$health_after" ]] && curl --fail --silent --show-error --max-time 5 http://127.0.0.1:3100/ >/dev/null; then
+    snapshot="$(pm2 jlist | node -e 'let s=""; process.stdin.on("data", d => s += d).on("end", () => { const a=JSON.parse(s).find(x => x.name === "pocket-indexer"); process.stdout.write(a ? `${a.pm2_env?.status ?? "unknown"}:${a.pm2_env?.restart_time ?? -1}` : "absent:-1"); });')"
+    if [[ -n "$(pm2 pid pocket-dashboard)" && -n "$(pm2 pid pocket-indexer)" && "$snapshot" == online:* ]] \
+      && HEALTH="$health_after" node -e 'const h=JSON.parse(process.env.HEALTH); const i=h.indexer; if (!i || i.isLocked !== true || !Number.isFinite(Number(i.highestIngestedHeight)) || !Number.isFinite(Number(i.contiguousHeight))) process.exit(1);'; then
+      indexed_after="$(HEALTH="$health_after" node -e 'const h=JSON.parse(process.env.HEALTH); process.stdout.write(String(Number(h.indexer.highestIngestedHeight)));')"
+      (( valid_samples += 1 ))
+      if (( valid_samples == 1 )); then
+        first_indexed_after="$indexed_after"
+        first_restart_after="${snapshot#*:}"
+        restart_before="${indexer_snapshot_before#*:}"
+        if [[ "$restart_before" != "-1" && "$first_restart_after" -gt $((restart_before + 1)) ]]; then
+          fail "indexer restarted more than once during activation"
+        fi
+      elif [[ "${snapshot#*:}" != "$first_restart_after" ]]; then
+        fail "indexer restart count changed during health window"
+      fi
+      last_indexed_after="$indexed_after"
+      if (( valid_samples >= 5 )); then
+        healthy=1
+        break
+      fi
+    fi
   fi
   sleep 2
 done
 
 (( healthy == 1 )) || fail "web/indexer health verification failed"
-log "indexer health verified; before=${health_before} after=${health_after}"
+[[ "$snapshot" == online:* ]] || fail "indexer did not remain online"
+(( last_indexed_after >= indexed_before )) || fail "indexer height regressed during deployment"
+log "indexer stable across ${valid_samples} samples; indexed_before=${indexed_before} indexed_after=${first_indexed_after}->${last_indexed_after} restart=${first_restart_after}"
 [[ "$(readlink -f "$CURRENT_LINK")" == "$release_dir" ]] || fail "current does not point to deployed SHA"
 
 pm2 save

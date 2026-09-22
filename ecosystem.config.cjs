@@ -1,3 +1,15 @@
+const path = require("node:path");
+const persistentDbPath = process.env.POCKET_SQLITE_PATH?.trim();
+
+if (!persistentDbPath || !path.isAbsolute(persistentDbPath)) {
+  throw new Error("Set POCKET_SQLITE_PATH to an absolute persistent database path before starting PM2");
+}
+
+const sharedProductionEnv = {
+  NODE_ENV: "production",
+  POCKET_SQLITE_PATH: persistentDbPath,
+};
+
 const deployRoot = process.env.DEPLOY_ROOT || "/srv/pocket-provider-dashboard";
 const cwd = `${deployRoot}/current`;
 
@@ -13,7 +25,7 @@ module.exports = {
       kill_timeout: 10000,
       time: true,
       env: {
-        NODE_ENV: "production",
+        ...sharedProductionEnv,
         POCKET_DB_READONLY: "true",
       },
     },
@@ -27,7 +39,7 @@ module.exports = {
       kill_timeout: 15000,
       time: true,
       env: {
-        NODE_ENV: "production",
+        ...sharedProductionEnv,
         POCKET_DB_READONLY: "false",
       },
     },

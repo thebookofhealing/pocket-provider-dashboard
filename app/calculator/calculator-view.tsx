@@ -27,10 +27,8 @@ export default function CalculatorView({ data }: { data: SerializedDashboardData
   return (
     <main className="page">
       <RevenueCalculator
-        poktPriceUsd={data.poktPriceUsd}
         services={services}
         suppliersPerSession={data.suppliersPerSession}
-        sessionObservedHeight={data.sessionObservedHeight}
         sessionFetchedAt={data.sessionFetchedAt}
         sessionStale={data.sessionStale}
       />

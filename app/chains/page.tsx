@@ -14,5 +14,5 @@ export default function ChainsPage() {
   const result = getDashboardDataSafe("30d");
   const data = result.data ? serializePublicDashboardData(result.data) : null;
 
-  return <ChainsExplorerView data={data} mode="chains" />;
+  return <ChainsExplorerView data={data} />;
 }

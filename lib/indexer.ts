@@ -44,6 +44,7 @@ import {
 import {
   updateGraphQLWatermark
 } from "@/lib/graphql";
+import { DEFAULT_RPC_URLS } from "@/lib/rpc-status";
 
 type RpcEvent = {
   type: string;
@@ -161,12 +162,6 @@ type IndexerOptions = {
   backfillDays?: number;
 };
 
-const DEFAULT_RPC_URLS = [
-  "https://sauron-rpc.infra.pocket.network",
-  "https://pocket-rpc.polkachu.com:443",
-  "https://rpc.pocket.chaintools.tech:443",
-  "https://pocket.api.pocket.network:443"
-];
 const RPC_URLS = Array.from(
   new Set(
     (process.env.POCKET_RPC_URLS ?? "")
@@ -191,18 +186,18 @@ const HASH_SALT = process.env.POCKET_INDEXER_HASH_SALT ?? "pocket-dashboard-publ
 const RETENTION_DAYS = Number(process.env.POCKET_INDEXER_RETENTION_DAYS ?? 45);
 const CACHE_INTERVAL_MS = Number(process.env.POCKET_INDEXER_CACHE_INTERVAL_MS ?? 30_000);
 const RPC_TIMEOUT_MS = Number(process.env.POCKET_INDEXER_RPC_TIMEOUT_MS ?? 8_000);
-const RPC_RETRIES = Number(process.env.POCKET_INDEXER_RPC_RETRIES ?? 1);
+const RPC_RETRIES = Number(process.env.POCKET_INDEXER_RPC_RETRIES ?? 3);
 const RPC_RETRY_DELAY_MS = Number(process.env.POCKET_INDEXER_RPC_RETRY_DELAY_MS ?? 500);
 const WS_IDLE_TIMEOUT_MS = Number(process.env.POCKET_INDEXER_WS_IDLE_TIMEOUT_MS ?? 45_000);
-const BACKFILL_CONCURRENCY = Number(process.env.POCKET_INDEXER_BACKFILL_CONCURRENCY ?? 2);
+const BACKFILL_CONCURRENCY = Number(process.env.POCKET_INDEXER_BACKFILL_CONCURRENCY ?? 8);
 const BACKFILL_BATCH_SIZE = Number(process.env.POCKET_INDEXER_BACKFILL_BATCH_SIZE ?? 500);
 const LIVE_CATCHUP_MAX_BLOCKS = Number(process.env.POCKET_INDEXER_LIVE_CATCHUP_MAX_BLOCKS ?? 1_000);
-const BLOCK_RETRIES = Number(process.env.POCKET_INDEXER_BLOCK_RETRIES ?? 1);
+const BLOCK_RETRIES = Number(process.env.POCKET_INDEXER_BLOCK_RETRIES ?? 5);
 const PRICE_TIMEOUT_MS = Number(process.env.POCKET_INDEXER_PRICE_TIMEOUT_MS ?? 20_000);
 const PRICE_URL = "https://api.coingecko.com/api/v3/simple/price?ids=pocket-network&vs_currencies=usd";
-const REPAIR_INTERVAL_MS = Number(process.env.POCKET_INDEXER_REPAIR_INTERVAL_MS ?? 300_000);
-const REPAIR_BATCH_SIZE = Number(process.env.POCKET_INDEXER_REPAIR_BATCH_SIZE ?? 50);
-const REPAIR_CONCURRENCY = Number(process.env.POCKET_INDEXER_REPAIR_CONCURRENCY ?? 1);
+const REPAIR_INTERVAL_MS = Number(process.env.POCKET_INDEXER_REPAIR_INTERVAL_MS ?? 60_000);
+const REPAIR_BATCH_SIZE = Number(process.env.POCKET_INDEXER_REPAIR_BATCH_SIZE ?? 250);
+const REPAIR_CONCURRENCY = Number(process.env.POCKET_INDEXER_REPAIR_CONCURRENCY ?? 4);
 const REPAIR_FAILED_COOLDOWN_MS = Number(process.env.POCKET_INDEXER_REPAIR_FAILED_COOLDOWN_MS ?? 300_000);
 const REPAIR_MAX_FAILED_RETRIES = Number(process.env.POCKET_INDEXER_REPAIR_MAX_FAILED_RETRIES ?? 10);
 const MIGRATION_MAX_RETRIES = 3;

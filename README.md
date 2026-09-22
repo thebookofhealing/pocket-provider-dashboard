@@ -1,11 +1,29 @@
-# Pocket Provider Dashboard
+# Kleomedes Pocket Provider Dashboard
 
-Public-facing Pocket Network dashboard focused on service demand, reward trends, and provider onboarding economics without naming or ranking commercial providers.
+Kleomedes-operated Pocket Network analytics dashboard focused on service demand, reward trends, provider economics, staking, and operational insight.
+
+## Ownership and Governance
+
+This repository is a **Kleomedes project**. It is not supervised by Pocket Network Foundation (PNF), and historical PNF feedback is no longer a product-policy constraint.
+
+- Product, UX, branding, disclosure, and architecture decisions are owned by the Kleomedes maintainers.
+- Contributions from `thebookofhealing` are contributions from a Kleomedes associate and should be reviewed as project work, not as external stakeholder policy.
+- Protocol correctness, data integrity, security, and honest labeling remain technical requirements regardless of project ownership.
+- Privacy or provider-identity restrictions should exist only when they serve the current product/security goals; they are not inherited automatically from the former PNF-supervised phase.
+
+## Documentation Authority
+
+Read project documentation in this order:
+
+1. **README.md** — current ownership, product state, runtime boundaries, and documentation map.
+2. **TECHNICAL_DESIGN.md** — protocol facts, data semantics, and current technical invariants.
+3. **ROADMAP.md** — future product/architecture direction; not a substitute for an approved GitHub execution plan.
+4. **GitHub issues and PRs** — scoped work, decisions, incidents, and implementation history. Closed superseded planning issues are historical context only unless explicitly referenced by a newer plan.
 
 ## Branch Scope
 
-- `main`: PNF-safe public dashboard. It does not expose named provider leaderboards, provider detail pages, staker rankings, supplier playbooks, or per-provider service mix in the UI or public dashboard API payloads.
-- `provider`: operator/provider intelligence edition preserved from the pre-PNF-feedback dashboard. It includes named provider rankings, provider detail reports, staker yield rankings, and infrastructure deep dives for private operator analysis.
+- `main`: canonical product and release branch.
+- `provider`: legacy/reference branch containing earlier provider-intelligence work. It is no longer a policy boundary; useful functionality may be ported to `main` when it fits the current Kleomedes product direction.
 
 ## Overview
 
@@ -29,7 +47,7 @@ Today, the project is intentionally lightweight:
 - a compact local SQLite store for indexed settlement facts, metadata, and dashboard snapshots
 - direct Pocket RPC as the primary source of truth
 - a legacy `Poktscan` ingestion worker kept temporarily as fallback while the indexer is validated
-- provider grouping at the domain level inside the ingestion model, with named provider data removed from public `main` surfaces
+- provider grouping at the domain level inside the ingestion model; identity exposure is a product decision enforced at the serialization/UI layer
 
 That makes it a good public demo, but not yet a full historical analytics product backed by a dedicated indexer.
 
@@ -64,9 +82,9 @@ In this mode, provider-side revenue is computed from the supplier-side share ins
 
 Some details are important when reading the numbers shown in the UI.
 
-- The public dashboard shows provider-domain metrics only as aggregate counts, averages, medians, and concentration measures.
-- Named provider rankings and provider-level operational detail are intentionally out of scope for `main`.
-- The preserved `provider` branch keeps the provider/operator edition for private analysis.
+- The dashboard may expose aggregate or named provider intelligence when it is useful and appropriately sourced.
+- Provider identity, ranking, and operational-detail choices are product decisions, not inherited PNF restrictions.
+- The `provider` branch is retained as a legacy/reference implementation, not as a mandatory public/private product split.
 - USD values are derived from the live CoinGecko price for `pocket-network`.
 - Time windows are based on settlement block time from indexed Pocket blocks.
 - The growth calculator is deliberately simple and designed to provide plausible onboarding guidance, not exact protocol-level forecasting.
@@ -102,7 +120,7 @@ npm run dev
 
 Then open `http://localhost:3000`.
 
-The UI reads local SQLite snapshots only. In development, if no local snapshot exists, `npm run dev` serves deterministic PNF-safe dummy analytics data so UI/UX work can continue without running the indexer. Set `POCKET_DISABLE_DEV_DUMMY_DATA=true` to see the real warming state instead.
+The UI reads local SQLite snapshots only. In development, if no local snapshot exists, `npm run dev` serves deterministic dummy analytics data so UI/UX work can continue without running the indexer. Set `POCKET_DISABLE_DEV_DUMMY_DATA=true` to see the real warming state instead.
 
 ## Production Runtime
 
@@ -121,7 +139,7 @@ pm2 start npm --name pocket-dashboard -- run start
 pm2 start npm --name pocket-indexer -- run indexer
 ```
 
-The indexer owns all Pocket RPC/WebSocket requests and writes dashboard snapshots to SQLite. The Next.js request path does not call Pocket RPC or Poktscan directly. Production `npm run indexer` is live-first: it opens the WebSocket immediately, runs bounded live catchup in the background, and lets the repair loop fill historical gaps without blocking current-height sync. `npm run indexer:backfill` remains available for manual/debug runs, but production should normally only run `npm run indexer`.
+The indexer owns Pocket analytics ingestion and writes dashboard snapshots to SQLite. Normal analytics request paths read those snapshots rather than fetching live chain data. Health/status surfaces may perform tightly bounded, read-only RPC probes when an independent chain-tip observation is required to detect a stalled indexer; those probes must not become a second ingestion path. Production `npm run indexer` is live-first: it opens the WebSocket immediately, runs bounded live catchup in the background, and lets the repair loop fill historical gaps without blocking current-height sync. `npm run indexer:backfill` remains available for manual/debug runs, but production should normally only run `npm run indexer`.
 
 Temporary legacy fallback:
 
@@ -205,9 +223,10 @@ This keeps the public demo responsive and reduces repeated network fetches.
 
 ## Repository Context
 
-If you want the longer-term direction for the project, see:
+Use the documentation authority order defined near the top of this README:
 
-- `TECHNICAL_DESIGN.md`
-- `ROADMAP.md`
+- `TECHNICAL_DESIGN.md` for protocol/data semantics and technical invariants.
+- `ROADMAP.md` for future direction.
+- `POCKET_RESOURCES.md` for external Pocket infrastructure/resources.
 
-Those documents describe the path toward a more rigorous RC1 architecture. The implementation in this repository is the current public demo version.
+GitHub issues and PRs remain the persistent source of truth for approved work, incidents, deviations, reviews, and merge state.

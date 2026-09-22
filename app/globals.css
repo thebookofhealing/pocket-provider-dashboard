@@ -2207,14 +2207,10 @@ code {
   color: var(--muted);
 }
 
-.site-footer strong {
+.site-footer-brand {
   color: var(--text);
   font-size: 0.95rem;
-}
-
-.site-footer p {
-  margin: 6px 0 0;
-  font-size: 0.85rem;
+  font-weight: 700;
 }
 
 .site-footer nav {

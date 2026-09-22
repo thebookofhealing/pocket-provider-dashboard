@@ -44,6 +44,7 @@ import {
 import {
   updateGraphQLWatermark
 } from "@/lib/graphql";
+import { DEFAULT_RPC_URLS } from "@/lib/rpc-status";
 
 type RpcEvent = {
   type: string;
@@ -161,12 +162,6 @@ type IndexerOptions = {
   backfillDays?: number;
 };
 
-const DEFAULT_RPC_URLS = [
-  "https://sauron-rpc.infra.pocket.network",
-  "https://pocket-rpc.polkachu.com:443",
-  "https://rpc.pocket.chaintools.tech:443",
-  "https://pocket.api.pocket.network:443"
-];
 const RPC_URLS = Array.from(
   new Set(
     (process.env.POCKET_RPC_URLS ?? "")

@@ -1,12 +1,12 @@
 import Link from "next/link";
 
-import { formatInteger, formatPercent } from "@/lib/format";
-import { getIndexedHeightCoverage, getIndexerHealth, getIndexerState } from "@/lib/db";
-import { DEFAULT_INDEXER_STALE_AFTER_MS, getIndexerFreshness } from "@/lib/indexer-freshness";
+import { formatInteger } from "@/lib/format";
+import { getIndexedHeightCoverage, getIndexerState } from "@/lib/db";
+import { getDashboardHealth } from "@/lib/dashboard-health";
 
 export const metadata = {
   title: "Network Status | Pocket Network Analytics",
-  description: "Indexer coverage, freshness, and data-source status for the public Pocket Network analytics dashboard."
+  description: "Dashboard liveness, freshness, and data-source status for Pocket Network analytics."
 };
 
 export const dynamic = "force-dynamic";
@@ -38,35 +38,27 @@ function formatIso(value: string | null): string {
   return date.toLocaleString("en-US", { dateStyle: "medium", timeStyle: "medium" });
 }
 
-export default function NetworkStatusPage() {
-  const health = getIndexerHealth();
-  const freshness = getIndexerFreshness({
-    latestIndexedBlockTime: health.latestIndexedBlockTime,
-    lastSuccessfulCommit: health.lastSuccessfulCommit,
-    staleAfterMs: Number(process.env.POCKET_INDEXER_STALE_AFTER_MS ?? DEFAULT_INDEXER_STALE_AFTER_MS),
-  });
-  const seenHeight = health.targetHeight;
-  const ingestedHeight = health.ingestedHeight;
-  const contiguousHeight = health.processedHeight;
+export default async function NetworkStatusPage() {
+  const dashboardHealth = await getDashboardHealth();
+  const health = dashboardHealth.indexer;
+  const currentBlockHeight = health.currentBlockHeight;
+  const seenHeight = health.seenHeight;
+  const ingestedHeight = health.highestIngestedHeight;
   const wsConnected = getStringState("ws_connected") === "true";
   const activeRpc = getStringState("active_rpc");
   const priceState = getPriceState();
   const averageBlockSeconds = Number(process.env.POCKET_INDEXER_AVG_BLOCK_SECONDS ?? 60);
   const retentionDays = Number(process.env.POCKET_INDEXER_RETENTION_DAYS ?? 45);
   const estimatedRetentionBlocks = Math.max(1, Math.round((retentionDays * 24 * 60 * 60) / Math.max(averageBlockSeconds, 1)));
-  const rangeEnd = seenHeight ?? ingestedHeight ?? contiguousHeight ?? 0;
+  const rangeEnd = seenHeight ?? ingestedHeight ?? health.contiguousHeight ?? 0;
   const rangeStart = Math.max(1, rangeEnd - estimatedRetentionBlocks + 1);
   const coverage = rangeEnd > 0 ? getIndexedHeightCoverage(rangeStart, rangeEnd) : [];
   const indexedCount = coverage.filter((row) => row.status === "indexed").length;
   const emptyCount = coverage.filter((row) => row.status === "empty").length;
-  const failedCount = health.failedHeights;
   const coveredCount = indexedCount + emptyCount;
-  const expectedCount = rangeEnd > 0 ? rangeEnd - rangeStart + 1 : 0;
   const missingCount = health.missingHeights;
-  const coveragePercent = expectedCount === 0 ? 0 : (coveredCount / expectedCount) * 100;
-  const lagBlocks = seenHeight != null && contiguousHeight != null
-    ? Math.max(0, seenHeight - contiguousHeight)
-    : null;
+  const lagBlocks = health.lag;
+  const indexerSynced = !health.stale;
   const newestScan = coverage.reduce<string | null>((latest, row) => {
     if (!latest) return row.scanned_at;
     return new Date(row.scanned_at).getTime() > new Date(latest).getTime() ? row.scanned_at : latest;
@@ -77,9 +69,9 @@ export default function NetworkStatusPage() {
       <section className="panel section explorer-hero network-hero">
         <div>
           <span className="eyebrow">Network Status</span>
-          <h1>Indexer Coverage.</h1>
+          <h1>Dashboard Health Monitoring</h1>
           <p className="section-subtitle" style={{ fontSize: "1.1rem", maxWidth: "640px" }}>
-            Operational visibility for the public analytics dataset. This page reports freshness and indexed-height coverage without exposing provider identities or operator-level detail.
+            This page reports liveness of the data displayed on our dashboard.
           </p>
           <div className="window-tabs" style={{ marginTop: "24px" }}>
             <Link href="/" className="calculator-action" style={{ background: "var(--panel-strong)", border: "1px solid var(--border)", color: "var(--text)", boxShadow: "none" }}>
@@ -90,47 +82,42 @@ export default function NetworkStatusPage() {
 
         <div className="explorer-summary-grid">
           <article className="explorer-summary-card panel-inset">
-            <span className="hero-highlight-label">Coverage</span>
-            <strong style={{ color: "var(--green)" }}>{formatPercent(coveragePercent, 1)}</strong>
-          </article>
-          <article className="explorer-summary-card panel-inset">
-            <span className="hero-highlight-label">Lag</span>
-            <strong style={{ color: freshness.stale || (lagBlocks != null && lagBlocks > 10) ? "var(--orange)" : "var(--accent)" }}>
-              {freshness.stale ? "Stale data" : lagBlocks == null ? "n/a" : `${formatInteger(lagBlocks)} blocks`}
+            <span className="hero-highlight-label">Status</span>
+            <strong style={{ color: indexerSynced ? "var(--green)" : "var(--red)", whiteSpace: "nowrap" }}>
+              {indexerSynced ? "Synced" : "Stale"}
             </strong>
           </article>
           <article className="explorer-summary-card panel-inset">
+            <span className="hero-highlight-label">Lag</span>
+            <strong className="network-lag-value" style={{ color: indexerSynced ? "var(--accent)" : "var(--orange)" }}>{lagBlocks == null ? "n/a" : `${formatInteger(lagBlocks)} blocks`}</strong>
+          </article>
+          <article className="explorer-summary-card panel-inset">
             <span className="hero-highlight-label">Retention</span>
-            <strong>{formatInteger(retentionDays)} days</strong>
+            <strong style={{ whiteSpace: "nowrap" }}>{formatInteger(retentionDays)} days</strong>
           </article>
         </div>
       </section>
 
       <section className="kpi-grid kpi-grid-strong rewards-kpi-grid">
         <article className="panel kpi kpi-primary">
+          <span className="kpi-label">Current Block Height</span>
+          <span className="kpi-value">{currentBlockHeight == null ? "n/a" : formatInteger(currentBlockHeight)}</span>
+          <span className="kpi-foot">Queried directly from the Pocket blockchain</span>
+        </article>
+        <article className="panel kpi">
           <span className="kpi-label">Latest Seen Height</span>
           <span className="kpi-value">{seenHeight == null ? "n/a" : formatInteger(seenHeight)}</span>
           <span className="kpi-foot">Highest chain height observed by the indexer</span>
         </article>
         <article className="panel kpi">
-          <span className="kpi-label">Highest Ingested Height</span>
+          <span className="kpi-label">Latest Ingested Height</span>
           <span className="kpi-value">{ingestedHeight == null ? "n/a" : formatInteger(ingestedHeight)}</span>
           <span className="kpi-foot">Highest height successfully processed</span>
-        </article>
-        <article className="panel kpi">
-          <span className="kpi-label">Contiguous Height</span>
-          <span className="kpi-value">{contiguousHeight == null ? "n/a" : formatInteger(contiguousHeight)}</span>
-          <span className="kpi-foot">Last verified contiguous checkpoint</span>
         </article>
         <article className="panel kpi">
           <span className="kpi-label">Covered Heights</span>
           <span className="kpi-value" style={{ color: "var(--green)" }}>{formatInteger(coveredCount)}</span>
           <span className="kpi-foot">Indexed or confirmed empty</span>
-        </article>
-        <article className="panel kpi">
-          <span className="kpi-label">Failed Heights</span>
-          <span className="kpi-value" style={{ color: failedCount > 0 ? "var(--orange)" : "var(--text)" }}>{formatInteger(failedCount)}</span>
-          <span className="kpi-foot">Retryable by the autonomous repair loop</span>
         </article>
       </section>
 
@@ -138,16 +125,14 @@ export default function NetworkStatusPage() {
         <article className="panel section">
           <div className="section-title-row">
             <div>
-              <h2 className="section-title">Coverage Breakdown</h2>
+              <h2 className="section-title">Dataset Breakdown</h2>
               <p className="section-subtitle">Height-level state for the current retention window.</p>
             </div>
-            <span className="pill">Public Dataset</span>
           </div>
-          <div className="network-coverage-grid">
+          <div className="network-coverage-grid network-coverage-grid-three">
             <div className="network-coverage-card density-low"><span>Indexed with events</span><strong>{formatInteger(indexedCount)}</strong></div>
             <div className="network-coverage-card"><span>Confirmed empty</span><strong>{formatInteger(emptyCount)}</strong></div>
             <div className="network-coverage-card density-medium"><span>Missing</span><strong>{formatInteger(missingCount)}</strong></div>
-            <div className="network-coverage-card density-high"><span>Failed</span><strong>{formatInteger(failedCount)}</strong></div>
           </div>
         </article>
 
@@ -155,7 +140,7 @@ export default function NetworkStatusPage() {
           <div className="section-title-row">
             <div>
               <h2 className="section-title">Runtime Notes</h2>
-              <p className="section-subtitle">What the public dashboard reads from.</p>
+              <p className="section-subtitle">Our indexer powers this dashboard</p>
             </div>
             <span className="pill">Indexer</span>
           </div>
@@ -177,17 +162,17 @@ export default function NetworkStatusPage() {
           <span className="pill">Health</span>
         </div>
 
-        <div className="insight-list">
-          <div className="insight-row"><span className="muted">Data source</span><strong>{wsConnected ? "CometBFT WebSocket" : "HTTP/RPC fallback"}</strong></div>
-          <div className="insight-row"><span className="muted">Active RPC</span><strong className="mono">{activeRpc ?? "n/a"}</strong></div>
-          <div className="insight-row"><span className="muted">POKT price</span><strong>{priceState.value == null ? "n/a" : `$${priceState.value.toFixed(4)}`}</strong></div>
-          <div className="insight-row"><span className="muted">Price updated</span><strong>{formatIso(priceState.updatedAt)}</strong></div>
-          <div className="insight-row"><span className="muted">Dataset freshness</span><strong style={{ color: freshness.stale ? "var(--orange)" : "var(--green)" }}>{freshness.stale ? "Stale" : "Current"}</strong></div>
-          <div className="insight-row"><span className="muted">Latest indexed block time</span><strong>{formatIso(freshness.freshnessTimestamp)}</strong></div>
-          <div className="insight-row"><span className="muted">Last successful ingestion</span><strong>{formatIso(health.lastSuccessfulCommit)}</strong></div>
-          <div className="insight-row"><span className="muted">Contiguous height</span><strong>{contiguousHeight == null ? "n/a" : formatInteger(contiguousHeight)}</strong></div>
-          <div className="insight-row"><span className="muted">Chain height</span><strong>{seenHeight == null ? "n/a" : formatInteger(seenHeight)}</strong></div>
-        </div>
+          <div className="insight-list">
+            <div className="insight-row"><span className="muted">Data source</span><strong>{wsConnected ? "CometBFT WebSocket" : "HTTP/RPC fallback"}</strong></div>
+            <div className="insight-row"><span className="muted">Active RPC</span><strong className="mono">{activeRpc ?? "n/a"}</strong></div>
+            <div className="insight-row"><span className="muted">Dataset freshness</span><strong style={{ color: health.stale ? "var(--orange)" : "var(--green)" }}>{health.stale ? "Stale" : "Current"}</strong></div>
+            <div className="insight-row"><span className="muted">Latest indexed block time</span><strong>{formatIso(health.freshnessTimestamp)}</strong></div>
+            <div className="insight-row"><span className="muted">Last successful ingestion</span><strong>{formatIso(health.lastSuccessfulCommit)}</strong></div>
+            <div className="insight-row"><span className="muted">POKT price</span><strong>{priceState.value == null ? "n/a" : `$${priceState.value.toFixed(4)}`}</strong></div>
+            <div className="insight-row"><span className="muted">Price updated</span><strong>{formatIso(priceState.updatedAt)}</strong></div>
+            <div className="insight-row"><span className="muted">Current block height</span><strong>{currentBlockHeight == null ? "n/a" : formatInteger(currentBlockHeight)}</strong></div>
+            <div className="insight-row"><span className="muted">Height source</span><strong className="mono">{health.currentBlockRpc ?? "n/a"}</strong></div>
+          </div>
       </section>
     </main>
   );

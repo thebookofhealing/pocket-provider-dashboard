@@ -161,7 +161,16 @@ rollback() {
     log "deployment failed after activation; rolling back to $(basename "$previous_release")"
     atomic_switch "$previous_release"
     if ! export_runtime_env; then rollback_failed=1; fi
-    if ! pm2 startOrReload "$CURRENT_LINK/ecosystem.config.cjs" --update-env; then rollback_failed=1; fi
+    rollback_config="$CURRENT_LINK/ecosystem.config.cjs"
+    if [[ ! -f "$rollback_config" && -f "$release_dir/ecosystem.config.cjs" ]]; then
+      rollback_config="$release_dir/ecosystem.config.cjs"
+    fi
+    if [[ ! -f "$rollback_config" ]]; then
+      log "ERROR: no PM2 configuration is available for rollback"
+      rollback_failed=1
+    elif ! pm2 startOrReload "$rollback_config" --update-env; then
+      rollback_failed=1
+    fi
     if ! pm2 save; then rollback_failed=1; fi
   fi
 

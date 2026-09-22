@@ -21,7 +21,9 @@ module.exports = {
       script: "npm",
       args: "run start",
       autorestart: true,
-      restart_delay: 1000,
+      restart_delay: 5_000,
+      min_uptime: "10s",
+      max_restarts: 20,
       kill_timeout: 10000,
       time: true,
       env: {
@@ -35,7 +37,9 @@ module.exports = {
       script: "npm",
       args: "run indexer",
       autorestart: true,
-      restart_delay: 2000,
+      restart_delay: 5_000,
+      min_uptime: "10s",
+      max_restarts: 50,
       kill_timeout: 15000,
       time: true,
       env: {

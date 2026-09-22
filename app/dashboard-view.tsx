@@ -350,7 +350,7 @@ export default function DashboardView({ initialWindow, dataByWindow, networkHist
                   <strong>{formatInteger(data.activeProviders)}</strong>
                 </div>
                 <div>
-                  <span>Supported Chains</span>
+                  <span>Active Chains</span>
                   <strong>{formatInteger(data.activeChains)}</strong>
                 </div>
                 <div>

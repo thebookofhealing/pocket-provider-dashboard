@@ -3,9 +3,11 @@ Common Resources in use on the Pocket Network Protocol
 
 ## Repository Scope Note
 
-The `main` branch is the PNF-safe public dashboard scope. It should use these resources to produce service-level and aggregate market intelligence only, without named provider rankings or per-provider operational detail.
+This file is a technical resource catalog, not a product-policy document.
 
-The `provider` branch preserves the operator intelligence edition for private provider analysis.
+`main` is the canonical Kleomedes product branch. The repository is not supervised by Pocket Network Foundation, and historical PNF restrictions on provider naming or public/private separation do not apply. The `provider` branch is retained only as legacy/reference material.
+
+Occurrences of “PNF” in the infrastructure tables below identify Pocket Network infrastructure operators and are factual resource metadata, not project governance.
 
 ## Dashboard Indexer Runtime
 

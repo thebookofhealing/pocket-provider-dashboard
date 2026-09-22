@@ -127,6 +127,7 @@ The analytics UI reads local SQLite snapshots only. The `/api/health` endpoint a
 Run the web process and indexer separately:
 
 ```bash
+export POCKET_SQLITE_PATH=/var/lib/pocket-dashboard/pocket-dashboard.sqlite
 npm run build
 npm run start
 npm run indexer
@@ -216,6 +217,7 @@ Indexer environment variables:
 - `POCKET_INDEXER_REPAIR_FAILED_COOLDOWN_MS` defaults to `300000`
 - `POCKET_INDEXER_REPAIR_MAX_FAILED_RETRIES` defaults to `10`
 - `POCKET_INDEXER_LIVE_CATCHUP_MAX_BLOCKS` defaults to `1000`; live mode skips stale checkpoints with larger gaps instead of replaying history
+- `POCKET_INDEXER_STALE_AFTER_MS` defaults to `900000` (15 minutes)
 - `POCKET_INDEXER_HASH_SALT` salt for privacy-preserving supplier/operator hashes
 - `POCKET_UI_MEMORY_CACHE_MS` defaults to `30000`
 

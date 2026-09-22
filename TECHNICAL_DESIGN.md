@@ -2,41 +2,27 @@
 
 ## Stato Attuale della Codebase
 
-La codebase attuale ha gia una demo pubblica funzionante. Dopo il feedback PNF, il branch `main` e esplicitamente limitato a una superficie pubblica neutrale: non deve nominare, classificare o linkare provider commerciali.
+Questa codebase e il prodotto Pocket analytics gestito da **Kleomedes**. Il progetto non e piu supervisionato da Pocket Network Foundation e i precedenti vincoli PNF su neutralita, naming dei provider o separazione obbligatoria public/private non sono requisiti correnti.
 
-Il branch `provider` conserva la precedente edizione operator/provider intelligence, inclusi ranking e dettagli per-provider, per analisi privata.
+Le decisioni di prodotto possono quindi includere ranking, provider detail, staking intelligence o altri insight nominali quando utili. Restano invece vincolanti i requisiti tecnici: correttezza rispetto al protocollo, provenienza e freschezza dei dati, sicurezza, semantica onesta delle metriche e operabilita.
+
+Il branch `main` e il prodotto canonico. Il branch `provider` e materiale legacy/reference da cui si puo portare funzionalita senza trattarlo come un confine di policy.
 
 In particolare oggi:
 
 - l'applicazione e una app Next.js servita separatamente da un indexer Node.js persistente
 - l'indexer segue i nuovi blocchi via WebSocket CometBFT e usa HTTP RPC per recuperare `/block_results` e colmare gap
-- la dashboard tenta prima di leggere aggregati da `Poktscan`
-- se `Poktscan` non e disponibile, usa un fallback RPC che legge `EventClaimSettled` dagli `end_block_events`
-- la persistenza locale e un SQLite leggero usato per cache di settlement block, metadata e snapshot della dashboard
-- il modello interno raggruppa i supplier anche a livello di provider domain, ma `main` rimuove nomi, chiavi, dettaglio supplier e mix per-provider dal payload pubblico
+- la persistenza locale e un SQLite leggero usato per settlement facts, metadata e snapshot della dashboard
+- il modello interno puo raggruppare supplier e provider domain; il livello di identita esposto e una decisione del prodotto
+- il legacy worker Poktscan/RPC rimane fallback temporaneo finche il percorso indexer-first non e completamente ritirato
 
-Quindi questo documento va letto come direzione architetturale per l'evoluzione verso una RC1 piu rigorosa, non come descrizione perfettamente aderente di ogni dettaglio implementato oggi.
+Questo documento e la fonte per protocol facts, data semantics e invarianti tecnici. Per stato prodotto/governance fa fede il README; per lavoro approvato fanno fede issue e PR GitHub.
 
 ## Scopo
 
-Questo documento definisce come costruire la prima versione utile di una dashboard Pocket Network per nuovi provider, con focus economico e neutralita PNF nella superficie pubblica.
+Definire l'architettura tecnica della dashboard Kleomedes per Pocket Network, inclusi ingestion, persistenza, metriche, API e superfici provider/service.
 
-Metriche RC1:
-
-- relay e revenue per service
-- metriche aggregate non nominali sui provider/domain
-- filtri temporali `24h`, `7d`, `30d`
-
-Fuori scope per `main`:
-
-- named provider leaderboards
-- provider detail pages
-- staker provider rankings
-- per-provider service mix, supplier counts, supplier addresses, or operational playbooks
-
-Queste viste possono vivere nel branch `provider`, non nella dashboard pubblica principale.
-
-Il documento e pensato per un agente o sviluppatore senza contesto precedente. Per questo include riferimenti diretti ai file di `poktroll` da cui derivano le decisioni architetturali.
+Le scelte su quali insight rendere pubblici o nominali non sono vincoli di protocollo e vanno prese come decisioni prodotto esplicite.
 
 ## Mappa Concettuale del Protocollo
 
@@ -142,7 +128,7 @@ Conseguenza pratica:
 - l'indicizzazione non deve basarsi solo su tx search o sugli eventi delle tx utente
 - il worker deve leggere i `block_results` e gli `end_block_events` blocco per blocco
 
-Questo e il punto implementativo piu importante dell'intero progetto. Nel branch `main`, l'indexer salva solo facts compatti e identita hashate; i payload pubblici non includono nomi, domini, indirizzi o mix operativi per-provider.
+Questo e il punto implementativo piu importante dell'intero progetto. L'indexer deve salvare facts compatti e coerenti; eventuale hashing, naming o dettaglio per-provider deve essere una scelta esplicita del modello dati e del serializer, non una conseguenza di vecchi vincoli di governance.
 
 ## Indexer Runtime Corrente
 
@@ -305,7 +291,7 @@ Se si vorra una vista "relay realmente eseguiti nel tempo", si potra arricchire 
 
 ## Architettura Consigliata
 
-Nota pratica: la demo pubblica attuale condensa questi ruoli dentro la stessa app Next.js e usa caching locale invece di tabelle analitiche complete. La separazione in componenti qui sotto resta comunque la direzione consigliata se il progetto evolvera oltre la primissima demo pubblica.
+Nota pratica: l'app attuale condensa alcuni di questi ruoli dentro la stessa app Next.js e usa caching locale invece di tabelle analitiche complete. La separazione in componenti qui sotto resta comunque la direzione consigliata se il progetto evolvera oltre la primissima demo pubblica.
 
 ## Componenti
 

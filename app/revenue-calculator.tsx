@@ -2,7 +2,7 @@
 
 import { useMemo, useState, useDeferredValue } from "react";
 
-import { formatCompactNumber, formatDecimal, formatInteger, formatUsd, formatUpokt } from "@/lib/format";
+import { formatCompactNumber, formatDecimal, formatInteger, formatUpokt } from "@/lib/format";
 import {
   allocateSuppliersByMarginalReturn,
   buildAllocatedServiceOpportunity,
@@ -21,32 +21,32 @@ type CalculatorService = {
 };
 
 type RevenueCalculatorProps = {
-  poktPriceUsd: number;
   services: CalculatorService[];
   suppliersPerSession?: number;
-  sessionObservedHeight?: number;
   sessionFetchedAt?: string;
   sessionStale?: boolean;
 };
 
 const MAX_SUPPLIER_COUNT = 9_999;
 const FREE_SUPPLIER_BUDGET = DEFAULT_NEW_PROVIDER_SUPPLIERS;
-const DEFAULT_SELECTED_CHAIN_COUNT = 10;
-const SESSION_DURATION_MINUTES = 30;
+const DEFAULT_SELECTED_CHAIN_COUNT = 5;
+const MIN_MONTHLY_RELAYS = 5_000_000;
 
 function clampSupplierCount(value: number): number {
   if (!Number.isFinite(value)) return 0;
   return Math.max(0, Math.min(MAX_SUPPLIER_COUNT, Math.trunc(value)));
 }
 
-function toUsdFromUpokt(value: bigint, poktPriceUsd: number): number {
-  return (Number(value) / 1_000_000) * poktPriceUsd;
-}
-
-export default function RevenueCalculator({ poktPriceUsd, services, suppliersPerSession, sessionObservedHeight, sessionFetchedAt, sessionStale }: RevenueCalculatorProps) {
+export default function RevenueCalculator({ services, suppliersPerSession, sessionFetchedAt, sessionStale }: RevenueCalculatorProps) {
   const liveSuppliersPerSession = suppliersPerSession ?? SESSION_SUPPLIER_SLOTS;
+  const eligibleServices = useMemo(
+    () => [...services]
+      .filter((service) => service.relays > MIN_MONTHLY_RELAYS)
+      .sort((a, b) => b.relays - a.relays || a.serviceName.localeCompare(b.serviceName)),
+    [services]
+  );
   const [selectedIds, setSelectedIds] = useState<string[]>(() =>
-    services.slice(0, DEFAULT_SELECTED_CHAIN_COUNT).map((service) => service.serviceId)
+    eligibleServices.slice(0, DEFAULT_SELECTED_CHAIN_COUNT).map((service) => service.serviceId)
   );
   const [supplierInput, setSupplierInput] = useState(String(FREE_SUPPLIER_BUDGET));
   const deferredSupplierInput = useDeferredValue(supplierInput);
@@ -54,8 +54,8 @@ export default function RevenueCalculator({ poktPriceUsd, services, suppliersPer
 
   const selectedServices = useMemo(() => {
     const selected = new Set(selectedIds);
-    return services.filter((service) => selected.has(service.serviceId));
-  }, [selectedIds, services]);
+    return eligibleServices.filter((service) => selected.has(service.serviceId));
+  }, [eligibleServices, selectedIds]);
 
   const supplierAllocation = useMemo(() => {
     return allocateSuppliersByMarginalReturn(selectedServices, supplierCount);
@@ -83,7 +83,7 @@ export default function RevenueCalculator({ poktPriceUsd, services, suppliersPer
   }
 
   function resetTopChains() {
-    setSelectedIds(services.slice(0, DEFAULT_SELECTED_CHAIN_COUNT).map((service) => service.serviceId));
+    setSelectedIds(eligibleServices.slice(0, DEFAULT_SELECTED_CHAIN_COUNT).map((service) => service.serviceId));
   }
 
   return (
@@ -102,7 +102,7 @@ export default function RevenueCalculator({ poktPriceUsd, services, suppliersPer
         <div>
           <h2 className="section-title">Growth Simulator</h2>
           <p className="section-subtitle">
-            Model your market entry with foundation support and real network demand.
+            Model your potential revenue by using this calculator to determine your best expansion opportunities.
           </p>
         </div>
         <span className="pill">Onboarding</span>
@@ -113,7 +113,7 @@ export default function RevenueCalculator({ poktPriceUsd, services, suppliersPer
           <div className="calculator-assumption panel-inset" style={{ borderRadius: 'var(--radius-lg)', border: '1px solid var(--border)' }}>
             <div>
               <span className="hero-highlight-label">Foundation Support</span>
-             <strong style={{ display: 'block', margin: '8px 0', fontSize: '1.5rem', color: 'var(--accent)' }}>15 Subsidized Units</strong>
+             <strong style={{ display: 'block', margin: '8px 0', fontSize: '1.5rem', color: 'var(--accent)' }}>15 Subsidized Suppliers</strong>
               <p style={{ fontSize: '0.9rem' }}>
                 Pocket Network Foundation provides <strong>15 free suppliers</strong> to bootstrap new providers. 
                 Our model assumes <strong>{liveSuppliersPerSession} slots</strong> per session.
@@ -126,7 +126,7 @@ export default function RevenueCalculator({ poktPriceUsd, services, suppliersPer
             </div>
 
             <label className="calculator-input-group">
-              <span className="hero-highlight-label">Your Units</span>
+              <span className="hero-highlight-label">Your Supplier Count</span>
               <input
                 type="number"
                 min={0}
@@ -165,7 +165,7 @@ export default function RevenueCalculator({ poktPriceUsd, services, suppliersPer
             </div>
 
             <div className="calculator-meta-card">
-              <span className="hero-highlight-label">Total Units</span>
+              <span className="hero-highlight-label">Total Supplier Count</span>
               <strong className="accent-number">{formatInteger(supplierCount)}</strong>
               <p>
                 {formatInteger(foundationCoveredSuppliers)} subsidized, {formatInteger(selfFundedSuppliers)} self-funded.
@@ -179,9 +179,9 @@ export default function RevenueCalculator({ poktPriceUsd, services, suppliersPer
             </div>
 
             <div className="calculator-meta-card">
-              <span className="hero-highlight-label">Unit Efficiency</span>
+              <span className="hero-highlight-label">Supplier Efficiency</span>
               <strong className="accent-number" style={{ color: 'var(--green)' }}>{formatUpokt(entryPerSupplierUpokt, 1)}</strong>
-              <p>Projected revenue per active unit.</p>
+              <p>Projected revenue per active supplier.</p>
             </div>
 
             <div className="calculator-meta-card">
@@ -192,8 +192,8 @@ export default function RevenueCalculator({ poktPriceUsd, services, suppliersPer
           </div>
 
           <p className="footer-note" style={{ opacity: 0.8 }}>
-            <strong>How it works:</strong> Units are distributed across selected chains to maximize yield. 
-            Competition is modeled against active suppliers on each service, while the 15-unit subsidy assumes new-provider onboarding.
+            <strong>How it works:</strong> Suppliers are distributed across selected chains to maximize yield.
+            Competition is modeled against active suppliers on each service, while the 15-supplier subsidy assumes new-provider onboarding.
           </p>
         </div>
 
@@ -209,7 +209,7 @@ export default function RevenueCalculator({ poktPriceUsd, services, suppliersPer
             <button type="button" className="btn btn-secondary" onClick={resetTopChains} style={{ fontSize: '12px' }}>
               Reset Default
             </button>
-            <button type="button" className="btn btn-primary" onClick={() => setSelectedIds(services.map((service) => service.serviceId))} style={{ fontSize: '12px' }}>
+            <button type="button" className="btn btn-primary" onClick={() => setSelectedIds(eligibleServices.map((service) => service.serviceId))} style={{ fontSize: '12px' }}>
               Select All
             </button>
             <button type="button" className="btn btn-ghost" onClick={() => setSelectedIds([])} style={{ fontSize: '12px' }}>
@@ -218,7 +218,7 @@ export default function RevenueCalculator({ poktPriceUsd, services, suppliersPer
           </div>
 
           <div className="calculator-list">
-            {services.map((service) => {
+            {eligibleServices.map((service) => {
               const checked = selectedIds.includes(service.serviceId);
 
               return (

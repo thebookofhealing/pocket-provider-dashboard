@@ -1,43 +1,29 @@
-# Pocket Dashboard RC1 Roadmap
+# Kleomedes Pocket Provider Dashboard Roadmap
 
 ## Stato Attuale
 
-La codebase attuale ha gia una dashboard demo funzionante e non parte piu da un repository vuoto. Dopo il feedback PNF, `main` e orientato a una dashboard pubblica neutrale: niente classifiche nominali di provider, niente detail page provider, niente ranking per staker e niente esposizione pubblica del mix operativo dei singoli provider.
+Il progetto e ora un prodotto **Kleomedes** indipendente e non e supervisionato da Pocket Network Foundation. Le restrizioni nate dal precedente feedback PNF — inclusa la separazione obbligatoria tra una superficie public “safe” e una provider-intelligence privata — sono ritirate come policy.
 
-La versione precedente orientata agli operatori e preservata nel branch `provider`.
+`main` e il prodotto canonico. Il branch `provider` resta una sorgente legacy/reference: feature utili possono essere portate nel prodotto principale senza mantenere artificialmente due prodotti, salvo una futura decisione esplicita motivata da sicurezza, audience o operabilita.
 
-Oggi il progetto ha gia:
+La codebase ha gia:
 
-- app Next.js con dashboard pubblica
-- filtri `24h`, `7d`, `30d`
-- vista servizi, trend reward aggregati e opportunity scoring
-- revenue calculator orientato all'onboarding
-- cache persistita in SQLite
-- nuovo indexer RPC/WebSocket proprietario in fase di adozione
-- fallback legacy `Poktscan`/RPC diretto ancora disponibile temporaneamente
+- app Next.js con dashboard e superfici provider/service
+- filtri temporali e metriche economiche
+- explorer servizi e calculator
+- cache/persistenza SQLite
+- indexer RPC/WebSocket proprietario
+- fallback legacy ancora presente temporaneamente
 
-Questa roadmap quindi descrive soprattutto l'evoluzione verso una RC1 piu rigorosa e storicamente completa, non un lavoro da rifare da zero.
+## Autorita della roadmap
 
-## Obiettivo RC1
+Questa roadmap descrive direzione e opportunita future. Non e un execution plan attivo: quando esiste una master plan issue approvata su GitHub, quella issue prevale per scope, sequencing, acceptance criteria e Definition of Done.
 
-Costruire una dashboard visiva per Pocket Network focalizzata sull'onboarding dei nuovi provider in modo neutrale verso gli operatori commerciali, con due metriche economiche iniziali:
+## Obiettivo
 
-- relay eseguiti per service e domanda aggregata
-- revenue aggregata, yield medio/mediano e metriche di competizione non nominali
+Costruire la migliore dashboard Kleomedes per analizzare Pocket Network dal punto di vista di provider, staking, domanda, reward e operazioni, scegliendo liberamente il livello di dettaglio e naming utile al prodotto.
 
-con filtri temporali `24h`, `7d`, `30d`.
-
-Nel protocollo Shannon di Pocket, la nozione piu vicina a "provider" nel codice e `Supplier`, mentre la nozione piu vicina a "chain" e `Service`:
-
-- provider operativo: `supplier_operator_address`
-- proprietario economico: `supplier_owner_address`
-- chain/prodotto servito: `service_id`
-
-Riferimenti codice:
-
-- `proto/pocket/shared/supplier.proto`
-- `proto/pocket/shared/service.proto`
-- `proto/pocket/tokenomics/event.proto`
+I vincoli non negoziabili sono correttezza del protocollo e delle metriche, provenienza/freschezza dei dati, sicurezza e chiarezza delle assunzioni. Neutralita commerciale o anonimizzazione non sono obiettivi automatici.
 
 ## Decisioni Fondative
 
@@ -172,7 +158,7 @@ Done when:
 Output:
 
 - query/API per `24h`, `7d`, `30d`
-- aggregati pubblici non nominali per provider/domain count, reward medio/mediano e concentrazione
+- aggregati provider/domain, reward e concentrazione coerenti con il prodotto corrente
 - vista service-level per relay, revenue, supplier density e opportunita di ingresso
 
 Task:
@@ -180,7 +166,7 @@ Task:
 - materializzare o calcolare on demand gli aggregati su `block_time`
 - sommare `num_relays` per `supplier_operator_address + service_id` nel modello interno
 - sommare supplier revenue per `supplier_operator_address` nel modello interno
-- pubblicare su `main` solo aggregati non nominali e service-level metrics
+- pubblicare su `main` le metriche e identita decise esplicitamente per il prodotto
 - opzionalmente preparare anche metriche secondarie: `minted_upokt`, `settled_upokt`, `overservicing_loss_upokt`, `deflation_loss_upokt`
 
 Done when:
@@ -238,7 +224,7 @@ Done when:
 ### Sprint 2
 
 - enrichment suppliers/services
-- UI RC1 con service explorer e metriche pubbliche non nominali
+- UI con service explorer e metriche provider/service
 - validazioni con dataset reale
 
 ### Sprint 3

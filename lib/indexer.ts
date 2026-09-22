@@ -1512,6 +1512,57 @@ function extractHeightFromWsMessage(data: unknown): number | null {
   }
 }
 
+let liveHeightQueue: number | null = null;
+let liveHeightQueueRunning = false;
+
+async function processLiveHeight(height: number): Promise<void> {
+  const checkpoint = Number(getIndexerState("contiguous_processed_height") ?? 0);
+  setIndexerState("highest_seen_height", String(height));
+  if (height <= checkpoint) return;
+
+  const fromHeight = checkpoint > 0 ? checkpoint + 1 : height;
+  const gapBlocks = height - fromHeight;
+  if (gapBlocks > 0) {
+    logWarn("Processing live tip before websocket checkpoint gap", {
+      checkpoint,
+      requestedFromHeight: fromHeight,
+      latestHeight: height,
+      gapBlocks,
+      liveCatchupMaxBlocks: LIVE_CATCHUP_MAX_BLOCKS
+    });
+    void runLiveCatchup(500).catch((error) => logError("Websocket gap catchup failed", error));
+  }
+
+  await processRange(height, height);
+}
+
+function drainLiveHeightQueue(): void {
+  if (liveHeightQueueRunning) return;
+  liveHeightQueueRunning = true;
+
+  void (async () => {
+    try {
+      while (liveHeightQueue !== null) {
+        const height = liveHeightQueue;
+        liveHeightQueue = null;
+        try {
+          await processLiveHeight(height);
+        } catch (error) {
+          logError("Live block processing failed", error, { height });
+        }
+      }
+    } finally {
+      liveHeightQueueRunning = false;
+      if (liveHeightQueue !== null) drainLiveHeightQueue();
+    }
+  })();
+}
+
+function enqueueLiveHeight(height: number): void {
+  liveHeightQueue = Math.max(liveHeightQueue ?? 0, height);
+  drainLiveHeightQueue();
+}
+
 async function runLive(): Promise<void> {
   let rpcIndex = 0;
 
@@ -1541,26 +1592,7 @@ async function runLive(): Promise<void> {
           lastMessageAt = Date.now();
           const height = extractHeightFromWsMessage(event.data);
           if (!height) return;
-
-          void (async () => {
-            const checkpoint = Number(getIndexerState("contiguous_processed_height") ?? 0);
-            setIndexerState("highest_seen_height", String(height));
-            if (height > checkpoint) {
-              const fromHeight = checkpoint > 0 ? checkpoint + 1 : height;
-              const gapBlocks = height - fromHeight;
-              if (gapBlocks > 0) {
-                logWarn("Processing live tip before websocket checkpoint gap", {
-                  checkpoint,
-                  requestedFromHeight: fromHeight,
-                  latestHeight: height,
-                  gapBlocks,
-                  liveCatchupMaxBlocks: LIVE_CATCHUP_MAX_BLOCKS
-                });
-                void runLiveCatchup(500).catch((error) => logError("Websocket gap catchup failed", error));
-              }
-              await processRange(height, height);
-            }
-          })().catch((error) => logError("Live block processing failed", error, { height }));
+          enqueueLiveHeight(height);
         });
         ws.addEventListener("close", () => {
           globalThis.clearInterval(idleTimer);

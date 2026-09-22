@@ -147,7 +147,7 @@ previous_realpath="$(realpath -e "$previous_release")"
 [[ "$previous_realpath" == "$releases_realpath"/* ]] || fail "previous release is outside canonical releases"
 previous_release="$previous_realpath"
 
-health_before="$(curl --fail --silent --show-error --max-time 5 "$HEALTH_URL" 2>/dev/null || true)"
+health_before="$(curl --fail --silent --show-error --max-time 15 "$HEALTH_URL" 2>/dev/null || true)"
 indexed_before="$(HEALTH="$health_before" node -e 'try { const h=JSON.parse(process.env.HEALTH); process.stdout.write(String(Number(h.indexer?.highestIngestedHeight ?? 0))); } catch { process.stdout.write("0"); }')"
 indexer_snapshot_before="$(pm2 jlist | node -e 'let s=""; process.stdin.on("data", d => s += d).on("end", () => { const a=JSON.parse(s).find(x => x.name === "pocket-indexer"); process.stdout.write(a ? `${a.pm2_env?.status ?? "unknown"}:${a.pm2_env?.restart_time ?? -1}` : "absent:-1"); });')"
 
@@ -240,7 +240,7 @@ last_indexed_after=0
 snapshot="absent:-1"
 first_restart_after="-1"
 for _ in $(seq 1 30); do
-  health_after="$(curl --fail --silent --show-error --max-time 5 "$HEALTH_URL")" || health_after=""
+  health_after="$(curl --fail --silent --show-error --max-time 15 "$HEALTH_URL")" || health_after=""
   if [[ -n "$health_after" ]] && curl --fail --silent --show-error --max-time 5 http://127.0.0.1:3100/ >/dev/null; then
     snapshot="$(pm2 jlist | node -e 'let s=""; process.stdin.on("data", d => s += d).on("end", () => { const a=JSON.parse(s).find(x => x.name === "pocket-indexer"); process.stdout.write(a ? `${a.pm2_env?.status ?? "unknown"}:${a.pm2_env?.restart_time ?? -1}` : "absent:-1"); });')"
     if [[ -n "$(pm2 pid pocket-dashboard)" && -n "$(pm2 pid pocket-indexer)" && "$snapshot" == online:* ]] \

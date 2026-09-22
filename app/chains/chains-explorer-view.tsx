@@ -39,10 +39,10 @@ type ChainsExplorerViewProps = {
 };
 
 type IndexerHealthResponse = {
-  stale?: boolean;
-  lagReliable?: boolean;
   indexer?: {
     lag?: number | null;
+    stale?: boolean;
+    lagReliable?: boolean;
   };
 };
 
@@ -114,7 +114,7 @@ export default function ChainsExplorerView({ data }: ChainsExplorerViewProps) {
       ? Math.max(0, data.indexerTargetHeight - data.indexerProcessedHeight)
       : null
   );
-  const [healthReportsStale, setHealthReportsStale] = useState(false);
+  const [healthReportsStale, setHealthReportsStale] = useState(true);
 
   function updateSort(nextSort: SortKey, nextDirection?: SortDirection) {
     if (nextDirection) {
@@ -174,7 +174,7 @@ export default function ChainsExplorerView({ data }: ChainsExplorerViewProps) {
         if (!active) return;
 
         setIndexerLag(typeof lag === "number" && Number.isFinite(lag) ? Math.max(0, lag) : null);
-        setHealthReportsStale(health.stale === true || health.lagReliable === false);
+        setHealthReportsStale(health.indexer?.stale === true || health.indexer?.lagReliable !== true);
       } catch {
         if (!active) return;
         setIndexerLag(null);

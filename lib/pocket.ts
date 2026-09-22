@@ -4,6 +4,7 @@ import { finishJobRun, getCachedSettlementBlocks, getDashboardCache, getMeta, is
 import { getDevelopmentDashboardData, getDevelopmentNetworkDailyHistory, getDevelopmentServiceDailyHistory, isDevelopmentDummyDataEnabled } from "@/lib/dev-fixtures";
 import { SESSION_SUPPLIER_SLOTS } from "@/lib/opportunities";
 import { PROVIDER_DOMAIN_LABEL_OVERRIDES, SUPPLIER_PROVIDER_OVERRIDES } from "@/lib/provider-overrides";
+import { DEFAULT_RPC_URLS } from "@/lib/rpc-status";
 import type {
   DashboardData,
   NetworkDailyHistoryPoint,
@@ -219,13 +220,6 @@ type SettlementEvent = {
   numRelays: number;
   supplierRevenueUpokt: bigint;
 };
-
-const DEFAULT_RPC_URLS = [
-  "https://sauron-rpc.infra.pocket.network",
-  "https://pocket-rpc.polkachu.com:443",
-  "https://rpc.pocket.chaintools.tech:443",
-  "https://pocket.api.pocket.network:443"
-];
 
 const DEFAULT_RPC_URL = process.env.POCKET_RPC_URL ?? DEFAULT_RPC_URLS[0];
 const DEFAULT_REST_URL = process.env.POCKET_REST_URL ?? "https://sauron-api.infra.pocket.network";

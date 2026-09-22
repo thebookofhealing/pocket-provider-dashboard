@@ -142,7 +142,20 @@ pm2 save
 
 The checked-in PM2 configuration requires one absolute persistent `POCKET_SQLITE_PATH`, passes that exact path to both processes, and starts the web process read-only (`POCKET_DB_READONLY=true`) while leaving the indexer as the only writer. Production startup fails closed when the path is missing or relative; the web process also requires the database file to already exist and never creates tables, runs migrations, or writes metadata. Verify both are online after every deployment:
 
-The indexer owns Pocket analytics ingestion and writes dashboard snapshots to SQLite. Normal analytics request paths read those snapshots rather than fetching live chain data. Health/status surfaces may perform tightly bounded, read-only RPC probes when an independent chain-tip observation is required to detect a stalled indexer; those probes must not become a second ingestion path. Production `npm run indexer` is live-first: it opens the WebSocket immediately, runs bounded live catchup in the background, and lets the repair loop fill historical gaps without blocking current-height sync. `npm run indexer:backfill` remains available for manual/debug runs, but production should normally only run `npm run indexer`.
+```bash
+pm2 status
+pm2 logs pocket-indexer --lines 100
+curl -fsS http://127.0.0.1:3100/api/health
+```
+
+If `/api/health` reports `status: "stale"`, restart the indexer and confirm that `highestIngestedHeight` and `freshnessTimestamp` advance:
+
+```bash
+pm2 restart pocket-indexer
+pm2 logs pocket-indexer --lines 100
+```
+
+The indexer owns all Pocket RPC/WebSocket ingestion requests and writes dashboard snapshots to SQLite. Normal analytics/data requests read the canonical SQLite snapshots only; the `/api/health` endpoint and Network Health surface are the narrow exception, using a bounded read-only RPC status probe solely to observe the independent chain tip. Production `npm run indexer` is live-first: it opens the WebSocket immediately, runs bounded live catchup in the background, and lets the repair loop fill historical gaps without blocking current-height sync. `npm run indexer:backfill` remains available for manual/debug runs, but production should normally only run `npm run indexer`.
 
 Temporary legacy fallback:
 

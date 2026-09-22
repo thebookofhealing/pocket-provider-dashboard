@@ -90,7 +90,7 @@ Optional overrides:
 - `POCKET_REST_URL`
 - `POKTSCAN_API_URL`
 - `POCKET_LEGACY_RPC_FALLBACK_ENABLED=true` opt-in guard for the old worker's heavy RPC fallback
-- `POCKET_SQLITE_PATH`
+- `POCKET_SQLITE_PATH` absolute persistent SQLite path; required in production and shared by the web and indexer processes
 
 ## Local Development
 
@@ -117,11 +117,12 @@ npm run indexer
 With PM2:
 
 ```bash
+export POCKET_SQLITE_PATH=/var/lib/pocket-dashboard/pocket-dashboard.sqlite
 pm2 start ecosystem.config.cjs
 pm2 save
 ```
 
-The checked-in PM2 configuration supervises both required production processes with automatic restart. Verify both are online after every deployment:
+The checked-in PM2 configuration requires one absolute persistent `POCKET_SQLITE_PATH`, passes that exact path to both processes, and starts the web process read-only (`POCKET_DB_READONLY=true`) while leaving the indexer as the only writer. Production startup fails closed when the path is missing or relative; the web process also requires the database file to already exist and never creates tables, runs migrations, or writes metadata. Verify both are online after every deployment:
 
 ```bash
 pm2 status
@@ -136,7 +137,7 @@ pm2 restart pocket-indexer
 pm2 logs pocket-indexer --lines 100
 ```
 
-The indexer owns all Pocket RPC/WebSocket requests and writes dashboard snapshots to SQLite. The Next.js request path does not call Pocket RPC or Poktscan directly. Production `npm run indexer` is live-first: it opens the WebSocket immediately, runs bounded live catchup in the background, and lets the repair loop fill historical gaps without blocking current-height sync. `npm run indexer:backfill` remains available for manual/debug runs, but production should normally only run `npm run indexer`.
+The indexer owns all Pocket RPC/WebSocket ingestion requests and writes dashboard snapshots to SQLite. Normal analytics/data requests read the canonical SQLite snapshots only; the `/api/health` endpoint and Network Health surface are the narrow exception, using a bounded read-only RPC status probe solely to observe the independent chain tip. Production `npm run indexer` is live-first: it opens the WebSocket immediately, runs bounded live catchup in the background, and lets the repair loop fill historical gaps without blocking current-height sync. `npm run indexer:backfill` remains available for manual/debug runs, but production should normally only run `npm run indexer`.
 
 Temporary legacy fallback:
 

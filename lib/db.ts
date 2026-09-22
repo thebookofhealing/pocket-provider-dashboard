@@ -86,7 +86,11 @@ export type IndexedDailyAggregate = {
 };
 
 const defaultDbPath = path.join(process.cwd(), "data", "pocket-dashboard.sqlite");
-const dbPath = process.env.POCKET_SQLITE_PATH ?? defaultDbPath;
+const configuredDbPath = process.env.POCKET_SQLITE_PATH?.trim() || null;
+if (process.env.NODE_ENV === "production" && (!configuredDbPath || !path.isAbsolute(configuredDbPath))) {
+  throw new Error("POCKET_SQLITE_PATH must be an absolute persistent path in production");
+}
+const dbPath = configuredDbPath ?? defaultDbPath;
 const isReadOnly = process.env.POCKET_DB_READONLY === "true";
 
 export function isDatabaseReadOnly(): boolean {
@@ -248,7 +252,7 @@ export function getIndexerHealth(): IndexerHealth {
 let db: Database.Database;
 
 if (isReadOnly) {
-  if (!process.env.POCKET_SQLITE_PATH) {
+  if (!configuredDbPath) {
     throw new Error("POCKET_SQLITE_PATH must be set when POCKET_DB_READONLY=true");
   }
   db = new Database(dbPath, { readonly: true, fileMustExist: true });

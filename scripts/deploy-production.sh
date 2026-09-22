@@ -4,14 +4,22 @@ umask 027
 
 SOURCE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DEPLOY_ROOT="${DEPLOY_ROOT:-/srv/pocket-provider-dashboard}"
-RELEASES_DIR="${DEPLOY_ROOT}/releases"
-SHARED_DIR="${DEPLOY_ROOT}/shared"
-CURRENT_LINK="${DEPLOY_ROOT}/current"
-ENV_FILE="${ENV_FILE:-${SHARED_DIR}/.env.production}"
+ENV_FILE="${ENV_FILE:-}"
 KEEP_RELEASES="${KEEP_RELEASES:-5}"
 HEALTH_URL="${HEALTH_URL:-http://127.0.0.1:3100/api/health}"
 
 [[ "$DEPLOY_ROOT" = /* ]] || { printf '[deploy] ERROR: DEPLOY_ROOT must be absolute\n' >&2; exit 1; }
+
+set_paths() {
+  RELEASES_DIR="${DEPLOY_ROOT}/releases"
+  SHARED_DIR="${DEPLOY_ROOT}/shared"
+  CURRENT_LINK="${DEPLOY_ROOT}/current"
+}
+
+set_paths
+if [[ -z "$ENV_FILE" ]]; then
+  ENV_FILE="${SHARED_DIR}/.env.production"
+fi
 
 log() {
   printf '[deploy] %s\n' "$*"
@@ -35,15 +43,27 @@ atomic_switch() {
 }
 
 load_runtime_env() {
+  local expected_env_file="$ENV_FILE"
+  local expected_deploy_root="$DEPLOY_ROOT"
+
   # shellcheck disable=SC1090
-  . "$ENV_FILE"
+  . "$expected_env_file"
+  ENV_FILE="$expected_env_file"
+  DEPLOY_ROOT="$expected_deploy_root"
+  set_paths
 }
 
 export_runtime_env() {
+  local expected_env_file="$ENV_FILE"
+  local expected_deploy_root="$DEPLOY_ROOT"
+
   set -a
   # shellcheck disable=SC1090
-  . "$ENV_FILE"
+  . "$expected_env_file"
   set +a
+  ENV_FILE="$expected_env_file"
+  DEPLOY_ROOT="$expected_deploy_root"
+  set_paths
 }
 
 make_writable() {
@@ -76,7 +96,9 @@ load_runtime_env
 [[ -f "$POCKET_SQLITE_PATH" ]] || fail "canonical SQLite database is missing"
 [[ -r "$POCKET_SQLITE_PATH" ]] || fail "canonical SQLite database is not readable"
 db_realpath="$(realpath -e "$POCKET_SQLITE_PATH")"
+deploy_root_realpath="$(realpath -m "$DEPLOY_ROOT")"
 releases_realpath="$(realpath -m "$RELEASES_DIR")"
+[[ "$releases_realpath" == "$deploy_root_realpath/releases" ]] || fail "release path is not under canonical deploy root"
 [[ "$db_realpath" != "$releases_realpath"/* ]] || fail "canonical SQLite database resolves inside releases"
 
 POCKET_BACKUP_DIR="${POCKET_BACKUP_DIR:-/var/backups/pocket-dashboard}"

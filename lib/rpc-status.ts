@@ -18,7 +18,7 @@ export type CurrentBlockHeight = {
   rpcUrl: string;
 };
 
-const RPC_STATUS_TIMEOUT_MS = 2_500;
+const RPC_STATUS_TIMEOUT_MS = 8_000;
 const MAX_RPC_PROBES = 5;
 
 function getRpcCandidates(): string[] {

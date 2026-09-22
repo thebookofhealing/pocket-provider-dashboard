@@ -10,17 +10,22 @@ const sharedProductionEnv = {
   POCKET_SQLITE_PATH: persistentDbPath,
 };
 
+const deployRoot = process.env.DEPLOY_ROOT || "/srv/pocket-provider-dashboard";
+const cwd = `${deployRoot}/current`;
+
 module.exports = {
   apps: [
     {
       name: "pocket-dashboard",
+      cwd,
       script: "npm",
       args: "run start",
-      cwd: __dirname,
       autorestart: true,
       restart_delay: 5_000,
       min_uptime: "10s",
       max_restarts: 20,
+      kill_timeout: 10000,
+      time: true,
       env: {
         ...sharedProductionEnv,
         POCKET_DB_READONLY: "true",
@@ -28,14 +33,15 @@ module.exports = {
     },
     {
       name: "pocket-indexer",
+      cwd,
       script: "npm",
       args: "run indexer",
-      cwd: __dirname,
       autorestart: true,
       restart_delay: 5_000,
       min_uptime: "10s",
       max_restarts: 50,
-      kill_timeout: 15_000,
+      kill_timeout: 15000,
+      time: true,
       env: {
         ...sharedProductionEnv,
         POCKET_DB_READONLY: "false",

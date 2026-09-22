@@ -86,7 +86,11 @@ export type IndexedDailyAggregate = {
 };
 
 const defaultDbPath = path.join(process.cwd(), "data", "pocket-dashboard.sqlite");
-const dbPath = process.env.POCKET_SQLITE_PATH ?? defaultDbPath;
+const configuredDbPath = process.env.POCKET_SQLITE_PATH?.trim() || null;
+if (process.env.NODE_ENV === "production" && (!configuredDbPath || !path.isAbsolute(configuredDbPath))) {
+  throw new Error("POCKET_SQLITE_PATH must be an absolute persistent path in production");
+}
+const dbPath = configuredDbPath ?? defaultDbPath;
 const isReadOnly = process.env.POCKET_DB_READONLY === "true";
 
 export function isDatabaseReadOnly(): boolean {
@@ -147,6 +151,8 @@ export type IndexerHealth = {
   processedHeight: number | null;
   targetHeight: number | null;
   ingestedHeight: number | null;
+  latestIndexedBlockTime: number | null;
+  lastIndexedAt: string | null;
   lastSuccessfulCommit: string | null;
   lastBackup: string | null;
   isLocked: boolean;
@@ -174,6 +180,13 @@ export function getIndexerHealth(): IndexerHealth {
     const processedHeight = getIndexerState("contiguous_processed_height");
     const targetHeight = getIndexerState("highest_seen_height");
     const ingestedHeightStr = getIndexerState("highest_ingested_height");
+    const latestIndexedBlock = db.prepare(`
+      SELECT block_time AS blockTime, scanned_at AS scannedAt
+      FROM indexed_heights
+      WHERE status IN ('indexed', 'empty') AND block_time IS NOT NULL
+      ORDER BY height DESC
+      LIMIT 1
+    `).get() as { blockTime: number | null; scannedAt: string | null } | undefined;
     let gaps = 0;
     let failedHeights = 0;
     let emptyNullTimestamps = 0;
@@ -202,6 +215,8 @@ export function getIndexerHealth(): IndexerHealth {
       processedHeight: processedHeight ? Number.parseInt(processedHeight, 10) || null : null,
       targetHeight: targetHeight ? Number.parseInt(targetHeight, 10) || null : null,
       ingestedHeight: ingestedHeightStr ? Number.parseInt(ingestedHeightStr, 10) || null : null,
+      latestIndexedBlockTime: latestIndexedBlock?.blockTime ?? null,
+      lastIndexedAt: latestIndexedBlock?.scannedAt ?? null,
       lastSuccessfulCommit: getIndexerState("last_successful_commit") ?? null,
       lastBackup: getIndexerState("last_backup") ?? null,
       isLocked,
@@ -219,6 +234,8 @@ export function getIndexerHealth(): IndexerHealth {
       processedHeight: null,
       targetHeight: null,
       ingestedHeight: null,
+      latestIndexedBlockTime: null,
+      lastIndexedAt: null,
       lastSuccessfulCommit: null,
       lastBackup: null,
       isLocked,
@@ -235,7 +252,7 @@ export function getIndexerHealth(): IndexerHealth {
 let db: Database.Database;
 
 if (isReadOnly) {
-  if (!process.env.POCKET_SQLITE_PATH) {
+  if (!configuredDbPath) {
     throw new Error("POCKET_SQLITE_PATH must be set when POCKET_DB_READONLY=true");
   }
   db = new Database(dbPath, { readonly: true, fileMustExist: true });
@@ -927,6 +944,7 @@ export function saveIndexedBlock(height: number, facts: IndexedSettlementFact[],
   const day = new Date(blockTime as number).toISOString().slice(0, 10);
   saveBlockHeader(height, blockTime as number, source);
   writeIndexedBlockTransaction(height, facts, blockTime as number, day, source);
+  setIndexerState("last_successful_commit", new Date().toISOString());
 }
 
 export function markIndexedHeightFailed(height: number, error: string, source = "rpc"): void {

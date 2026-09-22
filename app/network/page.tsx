@@ -2,6 +2,7 @@ import Link from "next/link";
 
 import { formatInteger, formatPercent } from "@/lib/format";
 import { getIndexedHeightCoverage, getIndexerHealth, getIndexerState } from "@/lib/db";
+import { DEFAULT_INDEXER_STALE_AFTER_MS, getIndexerFreshness } from "@/lib/indexer-freshness";
 
 export const metadata = {
   title: "Network Status | Pocket Network Analytics",
@@ -39,6 +40,11 @@ function formatIso(value: string | null): string {
 
 export default function NetworkStatusPage() {
   const health = getIndexerHealth();
+  const freshness = getIndexerFreshness({
+    latestIndexedBlockTime: health.latestIndexedBlockTime,
+    lastSuccessfulCommit: health.lastSuccessfulCommit,
+    staleAfterMs: Number(process.env.POCKET_INDEXER_STALE_AFTER_MS ?? DEFAULT_INDEXER_STALE_AFTER_MS),
+  });
   const seenHeight = health.targetHeight;
   const ingestedHeight = health.ingestedHeight;
   const contiguousHeight = health.processedHeight;
@@ -89,7 +95,9 @@ export default function NetworkStatusPage() {
           </article>
           <article className="explorer-summary-card panel-inset">
             <span className="hero-highlight-label">Lag</span>
-            <strong style={{ color: lagBlocks != null && lagBlocks > 10 ? "var(--orange)" : "var(--accent)" }}>{lagBlocks == null ? "n/a" : `${formatInteger(lagBlocks)} blocks`}</strong>
+            <strong style={{ color: freshness.stale || (lagBlocks != null && lagBlocks > 10) ? "var(--orange)" : "var(--accent)" }}>
+              {freshness.stale ? "Stale data" : lagBlocks == null ? "n/a" : `${formatInteger(lagBlocks)} blocks`}
+            </strong>
           </article>
           <article className="explorer-summary-card panel-inset">
             <span className="hero-highlight-label">Retention</span>
@@ -174,6 +182,9 @@ export default function NetworkStatusPage() {
           <div className="insight-row"><span className="muted">Active RPC</span><strong className="mono">{activeRpc ?? "n/a"}</strong></div>
           <div className="insight-row"><span className="muted">POKT price</span><strong>{priceState.value == null ? "n/a" : `$${priceState.value.toFixed(4)}`}</strong></div>
           <div className="insight-row"><span className="muted">Price updated</span><strong>{formatIso(priceState.updatedAt)}</strong></div>
+          <div className="insight-row"><span className="muted">Dataset freshness</span><strong style={{ color: freshness.stale ? "var(--orange)" : "var(--green)" }}>{freshness.stale ? "Stale" : "Current"}</strong></div>
+          <div className="insight-row"><span className="muted">Latest indexed block time</span><strong>{formatIso(freshness.freshnessTimestamp)}</strong></div>
+          <div className="insight-row"><span className="muted">Last successful ingestion</span><strong>{formatIso(health.lastSuccessfulCommit)}</strong></div>
           <div className="insight-row"><span className="muted">Contiguous height</span><strong>{contiguousHeight == null ? "n/a" : formatInteger(contiguousHeight)}</strong></div>
           <div className="insight-row"><span className="muted">Chain height</span><strong>{seenHeight == null ? "n/a" : formatInteger(seenHeight)}</strong></div>
         </div>

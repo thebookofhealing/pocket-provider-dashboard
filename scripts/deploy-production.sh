@@ -17,11 +17,6 @@ set_paths() {
 }
 
 set_paths
-if [[ -z "$ENV_FILE" ]]; then
-  ENV_FILE="${SHARED_DIR}/.env.production"
-fi
-[[ "$HEALTH_URL" == http://127.0.0.1:* ]] || { printf '[deploy] ERROR: HEALTH_URL must be local\n' >&2; exit 1; }
-[[ "$KEEP_RELEASES" =~ ^[1-9][0-9]*$ ]] || { printf '[deploy] ERROR: KEEP_RELEASES must be a positive integer\n' >&2; exit 1; }
 
 log() {
   printf '[deploy] %s\n' "$*"
@@ -88,6 +83,14 @@ for cmd in git node npm pm2 rsync curl readlink realpath python3; do
   require_command "$cmd"
 done
 
+DEPLOY_ROOT="$(realpath -m "$DEPLOY_ROOT")"
+set_paths
+if [[ -z "$ENV_FILE" ]]; then
+  ENV_FILE="${SHARED_DIR}/.env.production"
+fi
+[[ "$HEALTH_URL" == "http://127.0.0.1:3100/api/health" ]] || { printf '[deploy] ERROR: HEALTH_URL must be the local health endpoint\n' >&2; exit 1; }
+[[ "$KEEP_RELEASES" =~ ^[1-9][0-9]*$ ]] || { printf '[deploy] ERROR: KEEP_RELEASES must be a positive integer\n' >&2; exit 1; }
+
 [[ "${GITHUB_EVENT_NAME:-}" == "push" ]] || fail "production deploy requires a push event"
 [[ "${GITHUB_REF:-}" == "refs/heads/main" ]] || fail "production deploy requires refs/heads/main"
 [[ "${GITHUB_SHA:-}" =~ ^[0-9a-f]{40}$ ]] || fail "GITHUB_SHA must be a full commit SHA"
@@ -152,13 +155,14 @@ activated=0
 
 rollback() {
   local exit_code="$1"
+  local rollback_failed=0
 
   if (( activated == 1 )); then
     log "deployment failed after activation; rolling back to $(basename "$previous_release")"
     atomic_switch "$previous_release"
-    export_runtime_env
-    pm2 startOrReload "$CURRENT_LINK/ecosystem.config.cjs" --update-env || true
-    pm2 save || true
+    if ! export_runtime_env; then rollback_failed=1; fi
+    if ! pm2 startOrReload "$CURRENT_LINK/ecosystem.config.cjs" --update-env; then rollback_failed=1; fi
+    if ! pm2 save; then rollback_failed=1; fi
   fi
 
   if [[ -d "$release_dir" && "$release_dir" != "$previous_release" ]]; then
@@ -166,6 +170,10 @@ rollback() {
     rm -rf "$release_dir" || true
   fi
 
+  if (( rollback_failed == 1 )); then
+    log "ERROR: application rollback could not be fully verified"
+    exit 70
+  fi
   exit "$exit_code"
 }
 

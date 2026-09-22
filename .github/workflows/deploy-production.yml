@@ -1,0 +1,38 @@
+name: Deploy production
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pocket-provider-dashboard-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy to production VM
+    if: github.repository == 'tsulhc/pocket-provider-dashboard' && github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on:
+      - self-hosted
+      - linux
+      - x64
+      - pocket-provider-production
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Deploy release
+        env:
+          DEPLOY_ROOT: /srv/pocket-provider-dashboard
+          KEEP_RELEASES: "5"
+          HEALTH_URL: http://127.0.0.1:3100/api/health
+        run: bash scripts/deploy-production.sh

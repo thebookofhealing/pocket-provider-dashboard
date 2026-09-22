@@ -94,8 +94,8 @@ Some details are important when reading the numbers shown in the UI.
 - RPC pool:
   - `https://sauron-rpc.infra.pocket.network`
   - `https://pocket-rpc.polkachu.com:443`
-  - `https://rpc.pocket.chaintools.tech:443`
   - `https://pocket.api.pocket.network:443`
+  - `https://pocket-rpc.kleomedes.network`
 - REST:
   - `https://sauron-api.infra.pocket.network`
 
@@ -108,7 +108,7 @@ Optional overrides:
 - `POCKET_REST_URL`
 - `POKTSCAN_API_URL`
 - `POCKET_LEGACY_RPC_FALLBACK_ENABLED=true` opt-in guard for the old worker's heavy RPC fallback
-- `POCKET_SQLITE_PATH`
+- `POCKET_SQLITE_PATH` absolute persistent SQLite path; required in production and shared by the web and indexer processes
 
 ## Local Development
 
@@ -120,13 +120,14 @@ npm run dev
 
 Then open `http://localhost:3000`.
 
-The UI reads local SQLite snapshots only. In development, if no local snapshot exists, `npm run dev` serves deterministic dummy analytics data so UI/UX work can continue without running the indexer. Set `POCKET_DISABLE_DEV_DUMMY_DATA=true` to see the real warming state instead.
+The analytics UI reads local SQLite snapshots only. The `/api/health` endpoint and Network Health surface additionally perform the bounded read-only RPC status probe described below. In development, if no local snapshot exists, `npm run dev` serves deterministic dummy analytics data so UI/UX work can continue without running the indexer. Set `POCKET_DISABLE_DEV_DUMMY_DATA=true` to see the real warming state instead.
 
 ## Production Runtime
 
 Run the web process and indexer separately:
 
 ```bash
+export POCKET_SQLITE_PATH=/var/lib/pocket-dashboard/pocket-dashboard.sqlite
 npm run build
 npm run start
 npm run indexer
@@ -135,11 +136,27 @@ npm run indexer
 With PM2:
 
 ```bash
-pm2 start npm --name pocket-dashboard -- run start
-pm2 start npm --name pocket-indexer -- run indexer
+export POCKET_SQLITE_PATH=/var/lib/pocket-dashboard/pocket-dashboard.sqlite
+pm2 start ecosystem.config.cjs
+pm2 save
 ```
 
-The indexer owns Pocket analytics ingestion and writes dashboard snapshots to SQLite. Normal analytics request paths read those snapshots rather than fetching live chain data. Health/status surfaces may perform tightly bounded, read-only RPC probes when an independent chain-tip observation is required to detect a stalled indexer; those probes must not become a second ingestion path. Production `npm run indexer` is live-first: it opens the WebSocket immediately, runs bounded live catchup in the background, and lets the repair loop fill historical gaps without blocking current-height sync. `npm run indexer:backfill` remains available for manual/debug runs, but production should normally only run `npm run indexer`.
+The checked-in PM2 configuration requires one absolute persistent `POCKET_SQLITE_PATH`, passes that exact path to both processes, and starts the web process read-only (`POCKET_DB_READONLY=true`) while leaving the indexer as the only writer. Production startup fails closed when the path is missing or relative; the web process also requires the database file to already exist and never creates tables, runs migrations, or writes metadata. Verify both are online after every deployment:
+
+```bash
+pm2 status
+pm2 logs pocket-indexer --lines 100
+curl -fsS http://127.0.0.1:3100/api/health
+```
+
+If `/api/health` reports `status: "stale"`, restart the indexer and confirm that `highestIngestedHeight` and `freshnessTimestamp` advance:
+
+```bash
+pm2 restart pocket-indexer
+pm2 logs pocket-indexer --lines 100
+```
+
+The indexer owns all Pocket RPC/WebSocket ingestion requests and writes dashboard snapshots to SQLite. Normal analytics/data requests read the canonical SQLite snapshots only; the `/api/health` endpoint and Network Health surface are the narrow exception, using a bounded read-only RPC status probe solely to observe the independent chain tip. Production `npm run indexer` is live-first: it opens the WebSocket immediately, runs bounded live catchup in the background, and lets the repair loop fill historical gaps without blocking current-height sync. `npm run indexer:backfill` remains available for manual/debug runs, but production should normally only run `npm run indexer`.
 
 Temporary legacy fallback:
 
@@ -200,6 +217,7 @@ Indexer environment variables:
 - `POCKET_INDEXER_REPAIR_FAILED_COOLDOWN_MS` defaults to `300000`
 - `POCKET_INDEXER_REPAIR_MAX_FAILED_RETRIES` defaults to `10`
 - `POCKET_INDEXER_LIVE_CATCHUP_MAX_BLOCKS` defaults to `1000`; live mode skips stale checkpoints with larger gaps instead of replaying history
+- `POCKET_INDEXER_STALE_AFTER_MS` defaults to `900000` (15 minutes)
 - `POCKET_INDEXER_HASH_SALT` salt for privacy-preserving supplier/operator hashes
 - `POCKET_UI_MEMORY_CACHE_MS` defaults to `30000`
 

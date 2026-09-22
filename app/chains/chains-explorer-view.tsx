@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useMemo, useState, useEffect } from "react";
 
-import { formatCompactNumber, formatCompactUpokt, formatDecimal, formatInteger, formatPercent, formatUsd, formatUpokt } from "@/lib/format";
+import { formatCompactNumber, formatCompactUpokt, formatDecimal, formatInteger, formatUsd, formatUpokt } from "@/lib/format";
 import { buildAllocatedServiceOpportunity, DEFAULT_NEW_PROVIDER_SUPPLIERS, SESSION_SUPPLIER_SLOTS } from "@/lib/opportunities";
 import type { SerializedDashboardData, SerializedServiceStats } from "@/lib/types";
 
@@ -36,7 +36,6 @@ const SORT_COLUMNS: SortColumn[] = [
 
 type ChainsExplorerViewProps = {
   data: SerializedDashboardData | null;
-  mode?: "chains" | "service-demand";
 };
 
 function toPoktNumber(value: string): number {
@@ -91,140 +90,11 @@ function compareSortValue(a: string | number | bigint, b: string | number | bigi
   return (Number(a) - Number(b)) * multiplier;
 }
 
-function compareRevenueDesc(a: SerializedServiceStats, b: SerializedServiceStats): number {
-  const aRevenue = BigInt(a.revenueUpokt);
-  const bRevenue = BigInt(b.revenueUpokt);
-  if (aRevenue === bRevenue) return a.serviceName.localeCompare(b.serviceName);
-  return bRevenue > aRevenue ? 1 : -1;
-}
-
 function getSortDirectionLabel(direction: SortDirection): string {
   return direction === "asc" ? "ascending" : "descending";
 }
 
-function getShare(part: string | number, total: string | number): number {
-  if (typeof part === "string" || typeof total === "string") {
-    const totalBig = typeof total === "string" ? BigInt(total) : BigInt(total);
-    const partBig = typeof part === "string" ? BigInt(part) : BigInt(part);
-    if (totalBig === 0n) return 0;
-    return Number((partBig * 10_000n) / totalBig) / 100;
-  }
-
-  if (total === 0) return 0;
-  return (part / total) * 100;
-}
-
-function getRevenuePerMillionRelays(service: SerializedServiceStats): number {
-  return service.relays === 0 ? 0 : (toPoktNumber(service.revenueUpokt) / service.relays) * 1_000_000;
-}
-
-function getSupplierDensityLabel(service: SerializedServiceStats): string {
-  const suppliers = service.supplierCount ?? 0;
-  if (suppliers <= 25) return "low density";
-  if (suppliers <= 75) return "balanced";
-  return "dense";
-}
-
-function ServiceDemandMap({ services, totalRevenue }: { services: SerializedServiceStats[]; totalRevenue: string }) {
-  const eligibleServices = [...services]
-    .sort(compareRevenueDesc)
-    .filter((service) => BigInt(service.revenueUpokt) > 0n || service.relays > 0 || (service.computeUnits ?? 0) > 0);
-  const totalRelays = eligibleServices.reduce((sum, s) => sum + s.relays, 0);
-  const PAGE_SIZE_OPTIONS = [10, 25, 50] as const;
-  const [pageSize, setPageSize] = useState<number>(10);
-  const [page, setPage] = useState(1);
-  const pageCount = Math.max(1, Math.ceil(eligibleServices.length / pageSize));
-  const visibleServices = eligibleServices.slice((page - 1) * pageSize, page * pageSize);
-
-  function handlePageSizeChange(newSize: number) {
-    setPageSize(newSize);
-    setPage(1);
-  }
-
-  return (
-    <>
-    <div className="demand-signal-grid">
-      {visibleServices.length === 0 && (
-        <div className="demand-signal-card">
-          <div className="demand-signal-head">
-            <div>
-              <strong>No service demand yet</strong>
-              <div className="muted">Service-level demand will appear after settlement facts are indexed.</div>
-            </div>
-          </div>
-        </div>
-      )}
-      {visibleServices.map((service) => {
-        const share = getShare(service.revenueUpokt, totalRevenue);
-        const relayShare = totalRelays === 0 ? 0 : (service.relays / totalRelays) * 100;
-        const density = (service.supplierCount ?? 0) <= 25 ? "low" : (service.supplierCount ?? 0) <= 75 ? "medium" : "high";
-        const revenuePerMillionRelays = getRevenuePerMillionRelays(service);
-
-        return (
-          <Link key={service.serviceId} href={`/chains/${encodeURIComponent(service.serviceId)}`} className="demand-signal-card demand-signal-card-link" aria-label={`${service.serviceName} service details`}>
-            <div className="demand-signal-head">
-              <div>
-                <strong>{service.serviceName}</strong>
-                <div className="muted mono">{service.serviceId}</div>
-              </div>
-              <span className={`density density-${density}`}>{getSupplierDensityLabel(service)}</span>
-            </div>
-
-            <div className="demand-signal-metrics">
-              <div>
-                <span>Rewards</span>
-                <strong>{formatUpokt(BigInt(service.revenueUpokt), 1)}</strong>
-              </div>
-              <div>
-                <span>Relays</span>
-                <strong>{formatCompactNumber(service.relays)}</strong>
-              </div>
-              <div>
-                <span>Yield / 1M</span>
-                <strong>{formatDecimal(revenuePerMillionRelays, 2)} POKT</strong>
-              </div>
-            </div>
-
-            <div className="demand-signal-bars" aria-hidden="true">
-              <div>
-                <span>reward pool</span>
-                <div className="opportunity-track"><div className="opportunity-fill" style={{ width: `${Math.min(100, Math.max(0, share))}%` }} /></div>
-              </div>
-              <div>
-                <span>relay demand</span>
-                <div className="opportunity-track"><div className="opportunity-fill demand-fill-green" style={{ width: `${Math.min(100, Math.max(0, relayShare))}%` }} /></div>
-              </div>
-            </div>
-
-            <div className="demand-signal-foot">
-              <span>{formatInteger(service.supplierCount ?? 0)} suppliers live</span>
-              <span>{formatInteger(service.providerCount)} Unique Providers</span>
-              <span>{formatPercent(share, 1)} market share</span>
-            </div>
-          </Link>
-        );
-      })}
-    </div>
-
-    <div className="explorer-pagination" style={{ marginTop: '24px' }}>
-      <span className="muted">Showing {(page - 1) * pageSize + 1}–{Math.min(page * pageSize, eligibleServices.length)} of {formatInteger(eligibleServices.length)} services</span>
-      <div className="explorer-pagination-controls">
-        <span className="muted" style={{ marginRight: '12px' }}>Rows per page:</span>
-        {PAGE_SIZE_OPTIONS.map((size) => (
-          <button key={size} type="button" className={`pill ${pageSize === size ? 'active' : ''}`} onClick={() => handlePageSizeChange(size)}>
-            {size}
-          </button>
-        ))}
-        <button type="button" className="pill" disabled={page <= 1} onClick={() => setPage((p) => Math.max(1, p - 1))}>Previous</button>
-        <span className="muted" style={{ margin: '0 8px' }}>Page {page} of {pageCount}</span>
-        <button type="button" className="pill" disabled={page >= pageCount} onClick={() => setPage((p) => Math.min(pageCount, p + 1))}>Next</button>
-      </div>
-    </div>
-    </>
-  );
-}
-
-export default function ChainsExplorerView({ data, mode = "chains" }: ChainsExplorerViewProps) {
+export default function ChainsExplorerView({ data }: ChainsExplorerViewProps) {
   const [query, setQuery] = useState("");
   const [sort, setSort] = useState<SortKey>("revenue");
   const [sortDirection, setSortDirection] = useState<SortDirection>("desc");
@@ -256,7 +126,6 @@ export default function ChainsExplorerView({ data, mode = "chains" }: ChainsExpl
       .sort((a, b) => compareSortValue(getSortValue(a, sort, data?.suppliersPerSession ?? SESSION_SUPPLIER_SLOTS), getSortValue(b, sort, data?.suppliersPerSession ?? SESSION_SUPPLIER_SLOTS), sortDirection) || a.serviceName.localeCompare(b.serviceName));
   }, [data?.services, query, sort, sortDirection]);
 
-  const totalRevenue = data?.totalRevenueUpokt ?? "0";
   const eligibleServices = useMemo(() =>
     services.filter((s) => BigInt(s.revenueUpokt) > 0n || s.relays > 0 || (s.computeUnits ?? 0) > 0),
     [services]
@@ -279,8 +148,8 @@ export default function ChainsExplorerView({ data, mode = "chains" }: ChainsExpl
     return (
       <main className="page">
         <section className="panel section explorer-empty">
-          <span className="eyebrow">{mode === "chains" ? "Chains" : "Service Demand"}</span>
-          <h1 className="section-title">{mode === "chains" ? "Chain explorer is warming up." : "Service demand is warming up."}</h1>
+          <span className="eyebrow">Chains</span>
+          <h1 className="section-title">Chain explorer is warming up.</h1>
           <p className="section-subtitle">The 30d dashboard snapshot is still being prepared. Refresh shortly to inspect services.</p>
         </section>
       </main>
@@ -303,12 +172,10 @@ export default function ChainsExplorerView({ data, mode = "chains" }: ChainsExpl
         }} />
 
         <div>
-          <span className="eyebrow">{mode === "chains" ? "Chains" : "Service Demand"}</span>
-          <h1>{mode === "chains" ? "Chain Explorer." : "Chain Intelligence."}</h1>
+          <span className="eyebrow">Chains</span>
+          <h1>Chain Explorer.</h1>
           <p className="section-subtitle" style={{ fontSize: '1.1rem', maxWidth: '600px' }}>
-            {mode === "chains"
-              ? "Search, sort, and open service-level chain details from a dedicated explorer."
-              : "Top revenue chains first, then service demand signals without exposing provider identities."}
+            Search, sort, and open service-level chain details from a dedicated explorer.
             {data.sessionStale && <em className="muted"> Session parameters are stale; opportunity scores use last-known values{data.sessionFetchedAt ? ` from ${data.sessionFetchedAt}` : ""}.</em>}
           </p>
         </div>
@@ -334,21 +201,6 @@ export default function ChainsExplorerView({ data, mode = "chains" }: ChainsExpl
         </div>
       </section>
 
-      {mode === "service-demand" && (
-      <section className="panel section themed section-theme-demand">
-        <div className="section-title-row">
-          <div>
-            <h2 className="section-title">Service Demand Map</h2>
-            <p className="section-subtitle">Top service-level reward and relay signals for the current snapshot.</p>
-          </div>
-          <span className="pill">Demand</span>
-        </div>
-
-        <ServiceDemandMap services={data.services} totalRevenue={data.totalRevenueUpokt} />
-      </section>
-      )}
-
-      {mode === "chains" && (
       <section className="panel section">
         <div className="section-title-row">
           <div>
@@ -482,7 +334,6 @@ export default function ChainsExplorerView({ data, mode = "chains" }: ChainsExpl
           </div>
         </div>
       </section>
-      )}
     </main>
   );
 }

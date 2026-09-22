@@ -2,140 +2,351 @@
 
 import { useMemo, useState } from "react";
 
-import { formatCompactNumber, formatDecimal, formatUsd } from "@/lib/format";
+const POKT_PER_SUPPLIER = 59_500;
+const PROJECTION_MONTHS = 6;
+const MINIMUM_DISPLAY_APR = 10;
 
-type Props = {
-  networkRewards30d: number;
-  activeDomains: number;
-  poktPriceUsd: number;
-  generatedAt: string | null;
+type Scenario = "migrate" | "new";
+
+type PublicPlan = {
+  id: string;
+  provider: string;
+  plan: string;
+  apr: number;
+  clientShare: number;
+  displayedYield: number;
+  website?: string;
 };
 
-const MONTHS = 12;
+// Reference snapshot supplied from staking.pocket.network. Igniter currently
+// computes these APRs from a trailing seven-day reward window.
+const PUBLIC_PLANS: PublicPlan[] = [
+  { id: "kleomedes-public", provider: "Kleomedes", plan: "Public", apr: 65.3, clientShare: 49, displayedYield: 107.32, website: "https://kleomedes.cloud" },
+  { id: "kalorius-public", provider: "Kalorius.tech", plan: "public staking", apr: 40.7, clientShare: 20, displayedYield: 66.95, website: "https://kalorius.tech/" },
+  { id: "nodefleet-public", provider: "Nodefleet", plan: "Nodefleet-Public", apr: 28.4, clientShare: 75, displayedYield: 46.64, website: "https://nodefleet.org/" },
+  { id: "purroofgroup-public", provider: "purroofgroup", plan: "sv1-default", apr: 18.8, clientShare: 78, displayedYield: 30.92, website: "https://www.purroofgroup.com/" },
+  { id: "easy2stake-public", provider: "Easy2stake", plan: "igniter-1-eu-a", apr: 13.5, clientShare: 50, displayedYield: 22.19, website: "https://www.easy2stake.com/" },
+  { id: "highstakes-public", provider: "High Stakes 🇨🇭", plan: "Public", apr: 0.4, clientShare: 50, displayedYield: 0.7 },
+  { id: "stakeandrelax-public", provider: "Stake&Relax 🦥", plan: "Public stakers", apr: 0.3, clientShare: 49, displayedYield: 0.46 },
+].filter((plan) => plan.apr > MINIMUM_DISPLAY_APR).sort((a, b) => b.apr - a.apr);
 
-function clampNumber(value: number, minimum: number, maximum: number): number {
+function clampWholeNumber(value: number, minimum: number, maximum: number): number {
   if (!Number.isFinite(value)) return minimum;
-  return Math.min(maximum, Math.max(minimum, value));
+  return Math.round(Math.min(maximum, Math.max(minimum, value)));
 }
 
-export default function StakingDashboard({ networkRewards30d, activeDomains, poktPriceUsd, generatedAt }: Props) {
-  const [stake, setStake] = useState(15_000);
-  const [monthlyRate, setMonthlyRate] = useState(0.75);
-  const [commission, setCommission] = useState(5);
-  const [compound, setCompound] = useState(true);
+function formatPokt(value: number, maximumFractionDigits = 0): string {
+  return new Intl.NumberFormat("en-US", { maximumFractionDigits }).format(value);
+}
+
+function planLabel(plan: PublicPlan): string {
+  return `${plan.provider} — ${plan.apr.toFixed(1)}% APR`;
+}
+
+function projectedRewards(stakedPokt: number, apr: number, month: number): number {
+  return stakedPokt * (apr / 100) * (month / 12);
+}
+
+export default function StakingDashboard() {
+  const [scenario, setScenario] = useState<Scenario | null>(null);
+  const [supplierCount, setSupplierCount] = useState(1);
+  const [currentPlanId, setCurrentPlanId] = useState("easy2stake-public");
+  const [targetPlanId, setTargetPlanId] = useState("kleomedes-public");
+
+  const currentPlan = PUBLIC_PLANS.find((plan) => plan.id === currentPlanId) ?? PUBLIC_PLANS.at(-1)!;
+  const targetPlan = PUBLIC_PLANS.find((plan) => plan.id === targetPlanId) ?? PUBLIC_PLANS[0];
+  const stakedPokt = supplierCount * POKT_PER_SUPPLIER;
 
   const projection = useMemo(() => {
-    const netRate = (monthlyRate / 100) * (1 - commission / 100);
-    const points = Array.from({ length: MONTHS + 1 }, (_, month) => {
-      const balance = compound ? stake * Math.pow(1 + netRate, month) : stake * (1 + netRate * month);
-      return { month, balance, rewards: balance - stake };
+    const points = Array.from({ length: PROJECTION_MONTHS }, (_, index) => {
+      const month = index + 1;
+      return {
+        month,
+        current: scenario === "migrate" ? projectedRewards(stakedPokt, currentPlan.apr, month) : 0,
+        target: projectedRewards(stakedPokt, targetPlan.apr, month),
+      };
     });
-    return { points, rewards: points.at(-1)?.rewards ?? 0, netRate };
-  }, [commission, compound, monthlyRate, stake]);
+    const last = points.at(-1)!;
+    return {
+      points,
+      currentRewards: last.current,
+      targetRewards: last.target,
+      difference: last.target - last.current,
+    };
+  }, [currentPlan.apr, scenario, stakedPokt, targetPlan.apr]);
 
-  const annualYield = compound
-    ? (Math.pow(1 + projection.netRate, 12) - 1) * 100
-    : projection.netRate * 12 * 100;
-  const maxBalance = projection.points.at(-1)?.balance || stake;
-  const observedRewardPerDomain = activeDomains > 0 ? networkRewards30d / activeDomains : 0;
+  const aprDelta = scenario === "migrate" ? targetPlan.apr - currentPlan.apr : targetPlan.apr;
+  const monthlyDifference = projection.difference / PROJECTION_MONTHS;
+  const projectedRewardMaximum = Math.max(1, ...projection.points.flatMap((point) => [point.current, point.target]));
+  const chartAxisMaximum = Math.max(10_000, Math.ceil(projectedRewardMaximum / 10_000) * 10_000);
+  const isPositive = projection.difference >= 0;
+  const hasScenario = scenario !== null;
+  const monthLabels = useMemo(() => {
+    const currentMonth = new Date();
+    const formatter = new Intl.DateTimeFormat("en-US", { month: "short" });
+
+    return Array.from({ length: PROJECTION_MONTHS }, (_, index) => {
+      const month = new Date(currentMonth.getFullYear(), currentMonth.getMonth() + index + 1, 1);
+      return formatter.format(month);
+    });
+  }, []);
 
   return (
     <main className="page staking-page">
       <section className="panel section staking-hero">
         <div>
-          <span className="eyebrow">Supplier Economics</span>
-          <h1>Plan your POKT stake.</h1>
+          <span className="eyebrow">Supplier staking</span>
+          <h1>Put your POKT to work</h1>
           <p className="section-subtitle">
-            Explore reward scenarios with transparent assumptions. Adjust stake, monthly return, commission, and compounding to understand potential outcomes.
+            Compare provider staking plans and learn where to maximize your staking rewards
           </p>
         </div>
-        <div className="staking-hero-stat panel-inset">
-          <span className="hero-highlight-label">Observed network rewards</span>
-          <strong>{networkRewards30d > 0 ? `${formatCompactNumber(networkRewards30d)} POKT` : "Warming up"}</strong>
-          <span className="muted">Last 30 days · finalized settlements</span>
+        <aside className="hero-side panel panel-inset staking-hero-stat">
+          <div className="insight-list">
+            <div className="insight-row staking-minimum-row">
+              <span className="staking-tooltip-wrap">
+                <button className="muted staking-tooltip-trigger" type="button" aria-describedby="minimum-stake-tooltip">
+                  Minimum supplier stake
+                  <svg className="staking-tooltip-icon" viewBox="0 0 24 24" aria-hidden="true">
+                    <circle cx="12" cy="12" r="9" />
+                    <path d="M12 10.75v5" />
+                    <path d="M12 7.75h.01" />
+                  </svg>
+                </button>
+                <span className="staking-tooltip" id="minimum-stake-tooltip" role="tooltip">
+                  If you hold less than 59,500 POKT, stake with a{" "}
+                  <a
+                    href="https://wallet.keplr.app/chains/pocket-network?modal=staking&chain=pocket&validator_address=poktvaloper16e5nljedgjfaajcjg9p4a2x4tc78daq9yr56mq&step_id=3&action_id=stake"
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    validator
+                  </a>{" "}
+                  on Keplr wallet instead.
+                </span>
+              </span>
+              <strong>59,500 POKT</strong>
+            </div>
+          </div>
+        </aside>
+      </section>
+
+      <section className="panel section staking-plan-board">
+        <div className="section-title-row">
+          <div>
+            <span className="eyebrow eyebrow-ghost">Public plan leaderboard</span>
+            <h2 className="section-title">Compare every available plan</h2>
+            <p className="section-subtitle">Ranked highest to lowest based on current trailing 7-day APR</p>
+          </div>
+        </div>
+
+        <div className="staking-plan-table" role="table" aria-label="Public provider plans ranked by APR">
+          <div className="staking-plan-row header" role="row">
+            <span role="columnheader">Rank</span><span role="columnheader">Provider</span><span role="columnheader">Net daily POKT yield per supplier</span><span role="columnheader">Client share</span><span role="columnheader">POKT Staking APR</span>
+          </div>
+          {PUBLIC_PLANS.map((plan, index) => (
+            <div className={`staking-plan-row ${plan.id === targetPlanId ? "selected" : ""}`} role="row" key={plan.id}>
+              <span className="staking-rank" role="cell">{String(index + 1).padStart(2, "0")}</span>
+              <span className="staking-provider" role="cell">
+                {plan.website ? (
+                  <a href={plan.website} target="_blank" rel="noreferrer" aria-label={`${plan.provider} website (opens in a new tab)`}>
+                    <b>{plan.provider}</b>
+                  </a>
+                ) : <b>{plan.provider}</b>}
+              </span>
+              <span role="cell">{plan.displayedYield.toFixed(2)} <small>POKT/supplier</small></span>
+              <span role="cell">{plan.clientShare.toFixed(1)}%</span>
+              <strong role="cell">{plan.apr.toFixed(1)}%</strong>
+            </div>
+          ))}
         </div>
       </section>
 
-      <section className="staking-overview" aria-label="Staking overview">
-        <article className="panel kpi kpi-primary">
-          <span className="kpi-label">Projected 12m rewards</span>
-          <span className="kpi-value">{formatCompactNumber(projection.rewards)} POKT</span>
-          <span className="kpi-foot">{formatUsd(projection.rewards * poktPriceUsd)} at the current snapshot price</span>
-        </article>
-        <article className="panel kpi">
-          <span className="kpi-label">Modeled net yield</span>
-          <span className="kpi-value">{formatDecimal(annualYield, 2)}%</span>
-          <span className="kpi-foot">After {formatDecimal(commission, 1)}% commission</span>
-        </article>
-        <article className="panel kpi">
-          <span className="kpi-label">30d reward / domain</span>
-          <span className="kpi-value">{observedRewardPerDomain ? `${formatCompactNumber(observedRewardPerDomain)} POKT` : "—"}</span>
-          <span className="kpi-foot">Aggregate benchmark, not a yield estimate</span>
-        </article>
+      <section className={`staking-scenario-tabs ${hasScenario ? "" : "awaiting-selection"}`} aria-label="Choose a staking scenario">
+        <button aria-pressed={scenario === "new"} className={scenario === "new" ? "active" : ""} onClick={() => setScenario("new")} type="button">
+          <span className="staking-choice-marker" aria-hidden="true" />
+          <b>Stake POKT from your wallet</b>
+          <small>Projects your rewards for a new supplier allocation</small>
+        </button>
+        <button aria-pressed={scenario === "migrate"} className={scenario === "migrate" ? "active" : ""} onClick={() => setScenario("migrate")} type="button">
+          <span className="staking-choice-marker" aria-hidden="true" />
+          <b>Move existing suppliers</b>
+          <small>Compare the opportunity cost of your current supplier allocation</small>
+        </button>
       </section>
 
-      <section className="staking-workspace">
+      <section className={`staking-workspace ${hasScenario ? "" : "locked"}`} aria-disabled={!hasScenario}>
+        {!hasScenario && <span className="staking-workflow-lock" aria-hidden="true"><i /></span>}
         <article className="panel section staking-controls">
           <div>
-            <span className="eyebrow eyebrow-ghost">Your scenario</span>
-            <h2 className="section-title">Reward calculator</h2>
-            <p className="section-subtitle">These inputs are hypothetical and do not predict protocol rewards.</p>
+            <span className="eyebrow eyebrow-ghost">{scenario === "migrate" ? "Migration scenario" : scenario === "new" ? "New stake scenario" : "Staking calculator"}</span>
+            <h2 className="section-title">{scenario === "migrate" ? "Compare provider plans" : scenario === "new" ? "Model a new allocation" : "Model your supplier rewards with various provider plans"}</h2>
+            {scenario && (
+              <p className="section-subtitle">
+                {scenario === "migrate"
+                  ? "Choose where your suppliers are today and where you are considering moving them."
+                  : "Choose your desired public provider plan and number of suppliers."}
+              </p>
+            )}
           </div>
 
-          <label className="staking-field">
-            <span><b>POKT staked</b><output>{formatCompactNumber(stake)} POKT</output></span>
-            <input type="range" min="1000" max="100000" step="1000" value={stake} onChange={(event) => setStake(clampNumber(Number(event.target.value), 1_000, 100_000))} />
+          {scenario !== "new" && (
+            <label className="staking-input-group">
+              <span>Currently staked with</span>
+              <select disabled={!hasScenario} value={currentPlanId} onChange={(event) => setCurrentPlanId(event.target.value)}>
+                {PUBLIC_PLANS.map((plan) => <option key={plan.id} value={plan.id}>{planLabel(plan)}</option>)}
+              </select>
+            </label>
+          )}
+
+          <label className="staking-input-group">
+            <span>{scenario === "migrate" ? "Move suppliers to" : scenario === "new" ? "Public plan" : "Provider plan"}</span>
+            <select disabled={!hasScenario} value={targetPlanId} onChange={(event) => setTargetPlanId(event.target.value)}>
+              {PUBLIC_PLANS.map((plan) => <option key={plan.id} value={plan.id}>{planLabel(plan)}</option>)}
+            </select>
           </label>
-          <label className="staking-field">
-            <span><b>Monthly gross return</b><output>{formatDecimal(monthlyRate, 2)}%</output></span>
-            <input type="range" min="0" max="3" step="0.05" value={monthlyRate} onChange={(event) => setMonthlyRate(clampNumber(Number(event.target.value), 0, 3))} />
-          </label>
-          <label className="staking-field">
-            <span><b>Operator commission</b><output>{formatDecimal(commission, 1)}%</output></span>
-            <input type="range" min="0" max="25" step="0.5" value={commission} onChange={(event) => setCommission(clampNumber(Number(event.target.value), 0, 25))} />
-          </label>
-          <label className="staking-toggle">
-            <input type="checkbox" checked={compound} onChange={(event) => setCompound(event.target.checked)} />
-            <span aria-hidden="true" />
-            Reinvest monthly rewards
-          </label>
+
+          <div className="staking-input-group staking-supplier-input">
+            <label className="staking-input-label" htmlFor="supplier-count">Number of suppliers</label>
+            <input
+              className="staking-supplier-slider"
+              aria-label="Number of suppliers slider"
+              aria-describedby="supplier-slider-scale"
+              min="1"
+              max="100"
+              step="1"
+              type="range"
+              value={supplierCount}
+              disabled={!hasScenario}
+              onChange={(event) => setSupplierCount(Number(event.target.value))}
+            />
+            <span className="staking-slider-scale" id="supplier-slider-scale" aria-hidden="true"><span>1</span><span>100</span></span>
+            <input
+              id="supplier-count"
+              min="1"
+              max="100"
+              step="1"
+              type="number"
+              value={supplierCount}
+              disabled={!hasScenario}
+              onChange={(event) => setSupplierCount(clampWholeNumber(Number(event.target.value), 1, 100))}
+            />
+          </div>
+
+          <div className="staking-lookback" aria-label="APR lookback: trailing 7 days, verified">
+            <div>
+              <span>APR lookback</span>
+              <strong>Trailing 7 days</strong>
+            </div>
+            <span className="staking-verified-badge">Verified</span>
+          </div>
+
+          <div className="staking-method-note">
+            <span aria-hidden="true">i</span>
+            <p><b>How APR is calculated</b> Net POKT earned per supplier per day × 365 ÷ minimum supplier stake. This is a backward-looking 7 day average and does not guarantee future performance. We will add 14 and 30 day trailing APR in the future.</p>
+          </div>
         </article>
 
         <article className="panel section staking-projection">
           <div className="section-title-row">
             <div>
-              <span className="eyebrow eyebrow-ghost">Projection</span>
-              <h2 className="section-title">12-month balance</h2>
+              <span className="eyebrow eyebrow-ghost">Potential rewards</span>
+              <h2 className="section-title">Your Projected Rewards Over 6 Months</h2>
             </div>
-            <span className="pill">{compound ? "Compounding" : "Simple return"}</span>
           </div>
-          <div className="staking-chart" aria-label="Projected balance over 12 months">
-            {projection.points.map((point) => {
-              const growthRange = Math.max(1, maxBalance - stake);
-              const height = 18 + ((point.balance - stake) / growthRange) * 82;
-              return (
-                <div className="staking-bar-column" key={point.month} title={`Month ${point.month}: ${formatDecimal(point.balance, 0)} POKT`}>
-                  <div className="staking-bar" style={{ height: `${height}%` }} />
-                  <span>{point.month === 0 ? "Now" : point.month}</span>
-                </div>
-              );
-            })}
+
+          <div className={`staking-opportunity ${isPositive ? "positive" : "negative"}`}>
+            <span>{scenario === "migrate" ? "Projected difference" : "Projected rewards"}</span>
+            <strong>{hasScenario ? `${projection.difference >= 0 ? "+" : "−"}${formatPokt(Math.abs(projection.difference))} POKT` : "— POKT"}</strong>
+            <p>
+              {!hasScenario
+                ? "Six-month simple return"
+                : scenario === "migrate"
+                ? `${Math.abs(aprDelta).toFixed(1)} percentage points ${aprDelta >= 0 ? "higher" : "lower"} than ${currentPlan.provider}.`
+                : `Based on ${targetPlan.apr.toFixed(1)}% APR for ${supplierCount.toLocaleString()} supplier${supplierCount === 1 ? "" : "s"}.`}
+            </p>
           </div>
-          <div className="staking-result-row panel-inset">
-            <div><span>Ending balance</span><strong>{formatDecimal(stake + projection.rewards, 0)} POKT</strong></div>
-            <div><span>Rewards earned</span><strong className="staking-accent">+{formatDecimal(projection.rewards, 0)} POKT</strong></div>
+
+          {scenario === "migrate" && (
+            <div className="staking-chart-legend" aria-hidden="true">
+              <span><i className="current" /> Stay with {currentPlan.provider}</span>
+              <span><i className="target" /> Move to {targetPlan.provider}</span>
+            </div>
+          )}
+
+          <div className="staking-chart-shell" aria-label="Six-month cumulative reward projection">
+            <div className="staking-chart-content">
+              <div className="staking-comparison-chart">
+                {[0, 25, 50, 75, 100].map((percentage) => <i className="staking-chart-gridline" key={percentage} style={{ bottom: `${percentage}%` }} />)}
+                {projection.points.map((point) => (
+                  <div className="staking-month-column" key={point.month}>
+                    {scenario === "migrate" && (
+                      <span
+                        className="staking-comparison-bar current"
+                        style={{ height: `${Math.max(3, (point.current / chartAxisMaximum) * 100)}%` }}
+                        title={`${currentPlan.provider}, month ${point.month}: ${formatPokt(point.current)} POKT`}
+                      />
+                    )}
+                    <span
+                      className="staking-comparison-bar target"
+                      style={{ height: `${Math.max(3, (point.target / chartAxisMaximum) * 100)}%` }}
+                      title={`${targetPlan.provider}, month ${point.month}: ${formatPokt(point.target)} POKT`}
+                    />
+                  </div>
+                ))}
+              </div>
+              <div className="staking-chart-month-labels" aria-hidden="true">
+                {monthLabels.map((month) => <span key={month}>{month}</span>)}
+              </div>
+            </div>
+            <div className="staking-chart-y-axis" aria-hidden="true">
+              {[100, 75, 50, 25, 0].map((percentage) => (
+                <span key={percentage}>
+                  {percentage === 100 ? `${formatPokt(chartAxisMaximum)} POKT` : percentage === 50 ? `${formatPokt(chartAxisMaximum / 2)} POKT` : ""}
+                </span>
+              ))}
+            </div>
+          </div>
+
+          <div className="staking-result-grid panel-inset">
+            <div><span>POKT Staked</span><strong>{hasScenario ? formatPokt(stakedPokt) : "—"}</strong></div>
+            <div><span>Monthly POKT Rewards</span><strong className={hasScenario ? (monthlyDifference >= 0 ? "staking-accent" : "staking-loss") : ""}>{hasScenario ? `${monthlyDifference >= 0 ? "+" : "−"}${formatPokt(Math.abs(monthlyDifference))}` : "—"}</strong></div>
+            <div><span>Projected Plan APR</span><strong>{hasScenario ? `${targetPlan.apr.toFixed(1)}%` : "—"}</strong></div>
           </div>
         </article>
       </section>
 
+      <section className="panel section staking-how-it-works">
+        <div>
+          <span className="eyebrow eyebrow-ghost">Getting started</span>
+          <h2 className="section-title">How does staking work?</h2>
+        </div>
+
+        <ol className="staking-steps">
+          <li>Use your Keplr or Soothe wallet to access Igniter via <a href="https://staking.pocket.network" target="_blank" rel="noreferrer">staking.pocket.network</a>.</li>
+          <li>Once your wallet is connected, click on <b>Providers</b> to view your staking options.</li>
+          <li>Select your desired provider, click <b>Stake</b> and follow the prompts to set up your supplier.</li>
+        </ol>
+
+        <div className="staking-facts">
+          <h3>Facts about staking</h3>
+          <div className="staking-fact-grid">
+            <p><b>Staking is non-custodial:</b> Your tokens stay in your wallet, and only you control them.</p>
+            <p><b>Unstaking Period:</b> Tokens automatically become liquid in your wallet after 21 days.</p>
+            <p><b>Automatic rewards:</b> Rewards flow directly to the wallet you staked from—no claiming required.</p>
+            <p><b>Track rewards:</b> View your staking rewards in Igniter’s <b>Overview</b> tab.</p>
+          </div>
+        </div>
+      </section>
+
       <section className="panel section staking-notes">
-        <div><span className="staking-note-icon">01</span><h3>Stake is not the only variable</h3><p>Supplier rewards depend on service demand, session selection, uptime, pricing parameters, and protocol economics.</p></div>
-        <div><span className="staking-note-icon">02</span><h3>Returns are user-modeled</h3><p>The calculator never derives APY from the aggregate domain benchmark. Enter a return assumption appropriate for your own scenario.</p></div>
-        <div><span className="staking-note-icon">03</span><h3>Verify before committing</h3><p>Review current protocol rules, lock-up behavior, operating costs, and provider terms before staking.</p></div>
+        <div><span className="staking-note-icon">01</span><h3>APR is not a promise</h3><p>Provider performance, service mix, session selection, uptime, protocol economics, and commission can all change your rewards.</p></div>
+        <div><span className="staking-note-icon">02</span><h3>Historical Rewards</h3><p>Seven-day APR can change quickly, so keep an eye on your providers performance.</p></div>
+        <div><span className="staking-note-icon">03</span><h3>Verify before migrating</h3><p>Be aware of the 21-day unstaking period, fees, and variability in rewards prior to staking or moving your suppliers.</p></div>
       </section>
 
       <p className="footer-note staking-disclaimer">
-        Educational modeling only — not financial advice or a promise of returns.{generatedAt ? ` Network snapshot generated ${new Date(generatedAt).toLocaleString()}.` : " Live network data is warming up."}
+        Educational modeling only — not financial advice or a promise of returns. Projections use simple interest and exclude fees, downtime, compounding, and APR changes.
       </p>
     </main>
   );

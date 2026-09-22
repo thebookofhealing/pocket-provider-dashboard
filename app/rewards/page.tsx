@@ -16,6 +16,9 @@ type CalculatorService = {
   revenueUpokt: string;
   providerCount: number;
   supplierCount?: number;
+  eligibleSupplierCount?: number;
+  eligibleSupplierCountFetchedAt?: string;
+  eligibleSupplierCountStale?: boolean;
   appsStaked?: number;
 };
 
@@ -41,12 +44,15 @@ export default async function RewardsPage() {
     revenueUpokt: service.revenueUpokt.toString(),
     providerCount: service.providerCount,
     supplierCount: service.supplierCount,
+    eligibleSupplierCount: service.eligibleSupplierCount,
+    eligibleSupplierCountFetchedAt: service.eligibleSupplierCountFetchedAt,
+    eligibleSupplierCountStale: service.eligibleSupplierCountStale,
     appsStaked: service.appsStaked,
   }));
 
   return (
     <main className="page explorer-page">
-      <section className="page-heading" style={{ padding: '32px var(--page-padding, 24px) 0' }}>
+      <section className="panel section page-heading rewards-hero-panel">
         <h1>Provider Rewards Calculator</h1>
         <p>
           Leverage historical data to model potential rewards for deploying services on Pocket Network

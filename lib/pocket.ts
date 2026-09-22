@@ -1,6 +1,6 @@
 import { cache } from "react";
 
-import { finishJobRun, getCachedSettlementBlocks, getDashboardCache, getMeta, isDatabaseReadOnly, saveSettlementBlock, setDashboardCache, setMeta, startJobRun } from "@/lib/db";
+import { finishJobRun, getCachedSettlementBlocks, getDashboardCache, getIndexerState, getMeta, isDatabaseReadOnly, saveSettlementBlock, setDashboardCache, setMeta, startJobRun } from "@/lib/db";
 import { getDevelopmentDashboardData, getDevelopmentNetworkDailyHistory, getDevelopmentServiceDailyHistory, isDevelopmentDummyDataEnabled } from "@/lib/dev-fixtures";
 import { SESSION_SUPPLIER_SLOTS } from "@/lib/opportunities";
 import { PROVIDER_DOMAIN_LABEL_OVERRIDES, SUPPLIER_PROVIDER_OVERRIDES } from "@/lib/provider-overrides";
@@ -1363,40 +1363,43 @@ const getSupplierDirectory = cache(async (): Promise<SupplierDirectory> => {
   return directory;
 });
 
-const getServiceSupplierCounts = cache(async (): Promise<ServiceSupplierCounts> => {
-  const counts: ServiceSupplierCounts = {};
-  let nextKey = "";
+const SERVICE_SUPPLIER_COUNTS_TTL_MS = 6 * 60 * 60 * 1000;
+let serviceSupplierCountsCache: { value: ServiceSupplierCounts; fetchedAt: string } | null = null;
 
-  while (true) {
-    const search = new URLSearchParams({
-      dehydrated: "false",
-      "pagination.limit": "200"
-    });
-
-    if (nextKey) {
-      search.set("pagination.key", nextKey);
-    }
-
-    const response = await fetchJson<SuppliersResponse>(`${DEFAULT_REST_URL}${SUPPLIERS_PATH}?${search.toString()}`);
-
-    for (const supplier of response.supplier ?? []) {
-      const activeServiceIds = new Set(
-        (supplier.services ?? [])
-          .map((service) => service.service_id)
-          .filter((serviceId): serviceId is string => Boolean(serviceId))
-      );
-
-      for (const serviceId of activeServiceIds) {
-        counts[serviceId] = (counts[serviceId] ?? 0) + 1;
-      }
-    }
-
-    nextKey = response.pagination?.next_key ?? "";
-    if (!nextKey) break;
+const getServiceSupplierCounts = async (): Promise<ServiceSupplierCounts> => {
+  if (serviceSupplierCountsCache && Date.now() - new Date(serviceSupplierCountsCache.fetchedAt).getTime() < SERVICE_SUPPLIER_COUNTS_TTL_MS) {
+    return serviceSupplierCountsCache.value;
   }
-
-  return counts;
-});
+  try {
+    const counts: ServiceSupplierCounts = {};
+    let nextKey = "";
+    while (true) {
+      const search = new URLSearchParams({ dehydrated: "false", "pagination.limit": "200" });
+      if (nextKey) search.set("pagination.key", nextKey);
+      const response = await fetchJson<SuppliersResponse>(`${DEFAULT_REST_URL}${SUPPLIERS_PATH}?${search.toString()}`);
+      for (const supplier of response.supplier ?? []) {
+        const activeServiceIds = new Set((supplier.services ?? []).map((service) => service.service_id).filter((serviceId): serviceId is string => Boolean(serviceId)));
+        for (const serviceId of activeServiceIds) counts[serviceId] = (counts[serviceId] ?? 0) + 1;
+      }
+      nextKey = response.pagination?.next_key ?? "";
+      if (!nextKey) break;
+    }
+    serviceSupplierCountsCache = { value: counts, fetchedAt: new Date().toISOString() };
+    return counts;
+  } catch (error) {
+    const persisted = getIndexerState("eligible_supplier_counts");
+    if (persisted) {
+      try {
+        const parsed = JSON.parse(persisted) as { counts?: ServiceSupplierCounts; fetchedAt?: string };
+        if (parsed.counts && parsed.fetchedAt) {
+          serviceSupplierCountsCache = { value: parsed.counts, fetchedAt: parsed.fetchedAt };
+          return parsed.counts;
+        }
+      } catch { /* fall through to the original error */ }
+    }
+    throw error;
+  }
+};
 
 const getPoktscanSupplierDirectory = cache(async (): Promise<SupplierDirectory> => {
   const cached = getCachedPoktscanSupplierDirectory();
@@ -1591,6 +1594,7 @@ function buildDashboardFromProviderRows(
 ): DashboardData {
   const providerMap = new Map<string, ProviderStats>();
   const serviceMap = new Map<string, ServiceStats>();
+  const historicalSupplierSets = new Map<string, Set<string>>();
   const supplierChainMap = new Map<string, Set<string>>();
   let totalRelays = 0;
   let totalRevenueUpokt = 0n;
@@ -1615,6 +1619,9 @@ function buildDashboardFromProviderRows(
     provider.revenueUpokt += row.revenueUpokt;
 
     if (row.supplierOperatorAddress && row.supplierOwnerAddress) {
+      const historicalSuppliers = historicalSupplierSets.get(row.serviceId) ?? new Set<string>();
+      historicalSuppliers.add(row.supplierOperatorAddress);
+      historicalSupplierSets.set(row.serviceId, historicalSuppliers);
       const supplier = provider.suppliers.find((entry) => entry.operatorAddress === row.supplierOperatorAddress) ?? {
         operatorAddress: row.supplierOperatorAddress,
         ownerAddress: row.supplierOwnerAddress,
@@ -1726,7 +1733,9 @@ function buildDashboardFromProviderRows(
 
   for (const service of serviceMap.values()) {
     service.providerCount = providers.filter((provider) => provider.chains.some((chain) => chain.serviceId === service.serviceId)).length;
-    service.supplierCount = serviceSupplierCounts[service.serviceId] ?? 0;
+    service.supplierCount = historicalSupplierSets.get(service.serviceId)?.size ?? 0;
+    service.eligibleSupplierCount = serviceSupplierCounts[service.serviceId] ?? 0;
+    service.eligibleSupplierCountFetchedAt = serviceSupplierCountsCache?.fetchedAt;
   }
 
   const services = Array.from(serviceMap.values()).sort((a, b) =>
@@ -1781,11 +1790,15 @@ function buildDashboard(
 ): DashboardData {
   const providerMap = new Map<string, ProviderStats>();
   const serviceMap = new Map<string, ServiceStats>();
+  const historicalSupplierSets = new Map<string, Set<string>>();
   const supplierChainMap = new Map<string, Set<string>>();
   let totalRelays = 0;
   let totalRevenueUpokt = 0n;
 
   for (const settlement of settlements) {
+    const historicalSuppliers = historicalSupplierSets.get(settlement.serviceId) ?? new Set<string>();
+    historicalSuppliers.add(settlement.supplierOperatorAddress);
+    historicalSupplierSets.set(settlement.serviceId, historicalSuppliers);
     totalRelays += settlement.numRelays;
     totalRevenueUpokt += settlement.supplierRevenueUpokt;
 
@@ -1901,7 +1914,9 @@ function buildDashboard(
 
   for (const service of serviceMap.values()) {
     service.providerCount = providers.filter((provider) => provider.chains.some((chain) => chain.serviceId === service.serviceId)).length;
-    service.supplierCount = serviceSupplierCounts[service.serviceId] ?? 0;
+    service.supplierCount = historicalSupplierSets.get(service.serviceId)?.size ?? 0;
+    service.eligibleSupplierCount = serviceSupplierCounts[service.serviceId] ?? 0;
+    service.eligibleSupplierCountFetchedAt = serviceSupplierCountsCache?.fetchedAt;
   }
 
   const services = Array.from(serviceMap.values()).sort((a, b) =>

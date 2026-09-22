@@ -239,6 +239,10 @@ The app uses:
 
 This keeps the public demo responsive and reduces repeated network fetches.
 
+### Live staking plan feed
+
+The staking leaderboard is server-rendered from Pocket's public GraphQL indexer (`https://data.pocket.network/`) plus the live supplier minimum-stake parameter and refreshed every 15 minutes. Its reward pull mirrors Igniter's workflow: the seven-day window is anchored to the indexer's latest processed timestamp, `getRewardsByDomainsAndTimeGroupByService` is queried per provider domain, the live `tokenomics-mint_allocation_percentages.supplier` value is applied to gross rewards, and each service is divided by its own `staked_suppliers` before the seven-day average is calculated. Plans below 10% APR are filtered out, and economics are never fetched from the browser. If either source is unavailable or its source timestamp is older than 15 minutes, the last-known-good result is retained and the page marks it stale rather than presenting it as live. The UI labels fresh reward data **Live rewards**. Client-share and provider-plan identity are configured terms with an explicit `termsVerifiedAt` date; they are shown separately from the reward-source/fetched timestamps. Plans with non-uniform configured client shares by service are excluded from aggregate APR ranking until service-level plan-term modeling is available.
+
 ## Repository Context
 
 Use the documentation authority order defined near the top of this README:

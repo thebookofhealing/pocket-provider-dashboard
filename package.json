@@ -11,6 +11,7 @@
     "indexer": "tsx scripts/indexer.ts --live",
     "indexer:once": "tsx scripts/indexer.ts --once",
     "indexer:backfill": "tsx scripts/indexer.ts --backfill 45d",
+    "test:protocol": "tsx scripts/test-protocol.ts",
     "lint": "next lint",
     "typecheck": "tsc --noEmit -p tsconfig.typecheck.json"
   },

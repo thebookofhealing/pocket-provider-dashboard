@@ -1,35 +1,12 @@
 "use client";
 
 import { useMemo, useState } from "react";
+import type { PublicPlan, StakingPlansSnapshot } from "@/lib/staking-plans";
 
 const POKT_PER_SUPPLIER = 59_500;
 const PROJECTION_MONTHS = 6;
-const MINIMUM_DISPLAY_APR = 10;
-const PUBLIC_PLANS_SNAPSHOT_DATE = "September 22, 2026";
 
 type Scenario = "migrate" | "new";
-
-type PublicPlan = {
-  id: string;
-  provider: string;
-  plan: string;
-  apr: number;
-  clientShare: number;
-  displayedYield: number;
-  website?: string;
-};
-
-// Static reference snapshot supplied from staking.pocket.network. These values
-// must remain explicitly dated because this client component does not fetch live plans.
-const PUBLIC_PLANS: PublicPlan[] = [
-  { id: "kleomedes-public", provider: "Kleomedes", plan: "Public", apr: 65.3, clientShare: 49, displayedYield: 107.32, website: "https://kleomedes.cloud" },
-  { id: "kalorius-public", provider: "Kalorius.tech", plan: "public staking", apr: 40.7, clientShare: 20, displayedYield: 66.95, website: "https://kalorius.tech/" },
-  { id: "nodefleet-public", provider: "Nodefleet", plan: "Nodefleet-Public", apr: 28.4, clientShare: 75, displayedYield: 46.64, website: "https://nodefleet.org/" },
-  { id: "purroofgroup-public", provider: "purroofgroup", plan: "sv1-default", apr: 18.8, clientShare: 78, displayedYield: 30.92, website: "https://www.purroofgroup.com/" },
-  { id: "easy2stake-public", provider: "Easy2stake", plan: "igniter-1-eu-a", apr: 13.5, clientShare: 50, displayedYield: 22.19, website: "https://www.easy2stake.com/" },
-  { id: "highstakes-public", provider: "High Stakes 🇨🇭", plan: "Public", apr: 0.4, clientShare: 50, displayedYield: 0.7 },
-  { id: "stakeandrelax-public", provider: "Stake&Relax 🦥", plan: "Public stakers", apr: 0.3, clientShare: 49, displayedYield: 0.46 },
-].filter((plan) => plan.apr > MINIMUM_DISPLAY_APR).sort((a, b) => b.apr - a.apr);
 
 function clampWholeNumber(value: number, minimum: number, maximum: number): number {
   if (!Number.isFinite(value)) return minimum;
@@ -48,15 +25,32 @@ function projectedRewards(stakedPokt: number, apr: number, month: number): numbe
   return stakedPokt * (apr / 100) * (month / 12);
 }
 
-export default function StakingDashboard() {
+function formatFetchedAt(value: string): string {
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? "unknown time" : `${date.toISOString().slice(0, 16).replace("T", " ")} UTC`;
+}
+
+function formatTermsVerifiedAt(value: string): string {
+  const date = new Date(`${value}T00:00:00Z`);
+  return Number.isNaN(date.getTime()) ? value : new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", year: "numeric", timeZone: "UTC" }).format(date);
+}
+
+type StakingDashboardProps = StakingPlansSnapshot;
+
+export default function StakingDashboard({ plans: publicPlans, fetchedAt, sourceUpdatedAt, minimumSupplierStake, stale }: StakingDashboardProps) {
+  const PUBLIC_PLANS = publicPlans;
   const [scenario, setScenario] = useState<Scenario | null>(null);
   const [supplierCount, setSupplierCount] = useState(1);
-  const [currentPlanId, setCurrentPlanId] = useState("easy2stake-public");
-  const [targetPlanId, setTargetPlanId] = useState("kleomedes-public");
+  const [currentPlanId, setCurrentPlanId] = useState(publicPlans.at(-1)?.id ?? "");
+  const [targetPlanId, setTargetPlanId] = useState(publicPlans[0]?.id ?? "");
 
   const currentPlan = PUBLIC_PLANS.find((plan) => plan.id === currentPlanId) ?? PUBLIC_PLANS.at(-1)!;
   const targetPlan = PUBLIC_PLANS.find((plan) => plan.id === targetPlanId) ?? PUBLIC_PLANS[0];
-  const stakedPokt = supplierCount * POKT_PER_SUPPLIER;
+  if (!currentPlan || !targetPlan) {
+    return <main className="page staking-page"><section className="panel section explorer-empty"><h1 className="section-title">Staking plans are temporarily unavailable.</h1><p className="section-subtitle">Igniter did not return a usable public plan feed. Please try again shortly.</p></section></main>;
+  }
+  const poktPerSupplier = minimumSupplierStake || POKT_PER_SUPPLIER;
+  const stakedPokt = supplierCount * poktPerSupplier;
 
   const projection = useMemo(() => {
     const points = Array.from({ length: PROJECTION_MONTHS }, (_, index) => {
@@ -99,7 +93,7 @@ export default function StakingDashboard() {
           <span className="eyebrow">Supplier staking</span>
           <h1>Put your POKT to work</h1>
           <p className="section-subtitle">
-            Compare provider staking plans and learn where to maximize your staking rewards
+            Compare provider staking plans and maximize your staking rewards
           </p>
         </div>
         <aside className="hero-side panel panel-inset staking-hero-stat">
@@ -115,7 +109,7 @@ export default function StakingDashboard() {
                   </svg>
                 </button>
                 <span className="staking-tooltip" id="minimum-stake-tooltip" role="tooltip">
-                  If you hold less than 59,500 POKT, stake with a{" "}
+                  If you hold less than {formatPokt(poktPerSupplier)} POKT, stake with a{" "}
                   <a
                     href="https://wallet.keplr.app/chains/pocket-network?modal=staking&chain=pocket&validator_address=poktvaloper16e5nljedgjfaajcjg9p4a2x4tc78daq9yr56mq&step_id=3&action_id=stake"
                     target="_blank"
@@ -126,7 +120,7 @@ export default function StakingDashboard() {
                   on Keplr wallet instead.
                 </span>
               </span>
-              <strong>59,500 POKT</strong>
+              <strong>{formatPokt(poktPerSupplier)} POKT</strong>
             </div>
           </div>
         </aside>
@@ -136,16 +130,16 @@ export default function StakingDashboard() {
         <div className="section-title-row">
           <div>
             <span className="eyebrow eyebrow-ghost">Public plan leaderboard</span>
-            <h2 className="section-title">Public provider plan snapshot</h2>
+            <h2 className="section-title">Public provider plans</h2>
             <p className="section-subtitle">
-              Ranked highest to lowest by APR in the {PUBLIC_PLANS_SNAPSHOT_DATE} reference snapshot. <a href="https://staking.pocket.network/app/providers" target="_blank" rel="noreferrer">Verify live plans in Igniter</a> before staking.
+              Ranked highest to lowest based on current trailing 7-day APR. <span className={stale ? "staking-feed-status stale" : "staking-feed-status"}>{stale ? "Stale" : "Live rewards"} · fetched {formatFetchedAt(fetchedAt)}{sourceUpdatedAt ? ` · source ${formatFetchedAt(sourceUpdatedAt)}` : ""}</span>
             </p>
           </div>
         </div>
 
-        <div className="staking-plan-table" role="table" aria-label="Public provider plans in a dated reference snapshot">
+        <div className="staking-plan-table" role="table" aria-label="Public provider plans">
           <div className="staking-plan-row header" role="row">
-            <span role="columnheader">Rank</span><span role="columnheader">Provider</span><span role="columnheader">Net daily POKT yield per supplier</span><span role="columnheader">Client share</span><span role="columnheader">POKT Staking APR</span>
+            <span role="columnheader">Rank</span><span role="columnheader">Provider</span><span role="columnheader">Daily POKT Yield</span><span role="columnheader">Client share</span><span role="columnheader">Staking APR</span>
           </div>
           {PUBLIC_PLANS.map((plan, index) => (
             <div className={`staking-plan-row ${plan.id === targetPlanId ? "selected" : ""}`} role="row" key={plan.id}>
@@ -158,7 +152,7 @@ export default function StakingDashboard() {
                 ) : <b>{plan.provider}</b>}
               </span>
               <span role="cell">{plan.displayedYield.toFixed(2)} <small>POKT/supplier</small></span>
-              <span role="cell">{plan.clientShare.toFixed(1)}%</span>
+              <span className="staking-client-share" role="cell"><span>{plan.clientShare.toFixed(1)}%</span><small>Configured · verified {formatTermsVerifiedAt(plan.termsVerifiedAt)}</small></span>
               <strong role="cell">{plan.apr.toFixed(1)}%</strong>
             </div>
           ))}
@@ -236,17 +230,17 @@ export default function StakingDashboard() {
             />
           </div>
 
-          <div className="staking-lookback" aria-label="APR lookback: trailing 7 days, reference snapshot">
+          <div className="staking-lookback" aria-label="APR lookback: trailing 7 days">
             <div>
               <span>APR lookback</span>
-              <strong>Trailing 7 days · snapshot</strong>
+              <strong>Trailing 7 days · {stale ? "stale source" : "live rewards"}</strong>
             </div>
-            <span className="staking-verified-badge">Dated</span>
+            <span className={`staking-verified-badge ${stale ? "stale" : ""}`}>{stale ? "Stale" : "Live rewards"}</span>
           </div>
 
           <div className="staking-method-note">
             <span aria-hidden="true">i</span>
-            <p><b>How APR is calculated</b> Net POKT earned per supplier per day × 365 ÷ minimum supplier stake. This is a backward-looking 7 day average and does not guarantee future performance. We will add 14 and 30 day trailing APR in the future.</p>
+            <p><b>How APR is calculated</b> Net POKT earned per supplier per day × 365 ÷ minimum supplier stake. This is a backward-looking 7 day average and does not guarantee future performance. We will add 14 and 30 day trailing APR in the future.<br /><small>Client share is a configured plan term, verified {formatTermsVerifiedAt(targetPlan.termsVerifiedAt)}; reward performance and the minimum stake refresh separately.</small></p>
           </div>
         </article>
 
@@ -328,14 +322,14 @@ export default function StakingDashboard() {
         <ol className="staking-steps">
           <li>Use your Keplr or Soothe wallet to access Igniter via <a href="https://staking.pocket.network" target="_blank" rel="noreferrer">staking.pocket.network</a>.</li>
           <li>Once your wallet is connected, click on <b>Providers</b> to view your staking options.</li>
-          <li>Select your desired provider, click <b>Stake</b> and follow the prompts to set up your supplier.</li>
+            <li>Select your provider, click <b>Stake</b> and follow the prompts to set up your supplier.</li>
         </ol>
 
         <div className="staking-facts">
           <h3>Facts about staking</h3>
           <div className="staking-fact-grid">
             <p><b>Staking is non-custodial:</b> Your tokens stay in your wallet, and only you control them.</p>
-            <p><b>Unstaking Period:</b> Tokens automatically become liquid in your wallet after 21 days.</p>
+            <p><b>Unstaking Period:</b> Tokens become liquid in your wallet after 21 days.</p>
             <p><b>Automatic rewards:</b> Rewards flow directly to the wallet you staked from—no claiming required.</p>
             <p><b>Track rewards:</b> View your staking rewards in Igniter’s <b>Overview</b> tab.</p>
           </div>

@@ -218,6 +218,7 @@ const SESSION_SYNC_INTERVAL_MS = 60 * 60 * 1000;
 const SESSION_FRESHNESS_MS = 60 * 60 * 1000;
 const INDEXER_DATA_VERSION = 4;
 const rpcStats = new Map<string, { successes: number; failures: number; timeouts: number; totalLatencyMs: number }>();
+let rpcRequestTail = Promise.resolve();
 
 function logInfo(message: string, context?: Record<string, unknown>): void {
   console.info(`[pocket-dashboard:indexer] ${message}`, context ?? "");
@@ -322,36 +323,53 @@ async function fetchJson<T>(url: string, timeoutMs = RPC_TIMEOUT_MS): Promise<T>
   return (await response.json()) as T;
 }
 
-async function fetchFromRpcPool<T>(path: string, seed = 0, rpcUrls = RPC_URLS): Promise<T> {
-  const candidates = [...rpcUrls.slice(seed % rpcUrls.length), ...rpcUrls.slice(0, seed % rpcUrls.length)];
-  let lastError: unknown;
+async function withRpcRequestSlot<T>(work: () => Promise<T>): Promise<T> {
+  const previous = rpcRequestTail;
+  let release!: () => void;
+  rpcRequestTail = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  await previous;
 
-  for (let attempt = 1; attempt <= RPC_RETRIES; attempt += 1) {
-    for (const rpcUrl of candidates) {
-      const startedAt = Date.now();
-      try {
-        const result = await fetchJson<T>(rpcPath(rpcUrl, path));
-        recordRpcResult(rpcUrl, true, Date.now() - startedAt);
-        return result;
-      } catch (error) {
-        lastError = error;
-        recordRpcResult(rpcUrl, false, Date.now() - startedAt, error);
-        logWarn("RPC request failed", {
-          rpcUrl,
-          path,
-          attempt,
-          maxAttempts: RPC_RETRIES,
-          error: formatError(error)
-        });
+  try {
+    return await work();
+  } finally {
+    release();
+  }
+}
+
+async function fetchFromRpcPool<T>(path: string, seed = 0, rpcUrls = RPC_URLS): Promise<T> {
+  return withRpcRequestSlot(async () => {
+    const candidates = [...rpcUrls.slice(seed % rpcUrls.length), ...rpcUrls.slice(0, seed % rpcUrls.length)];
+    let lastError: unknown;
+
+    for (let attempt = 1; attempt <= RPC_RETRIES; attempt += 1) {
+      for (const rpcUrl of candidates) {
+        const startedAt = Date.now();
+        try {
+          const result = await fetchJson<T>(rpcPath(rpcUrl, path));
+          recordRpcResult(rpcUrl, true, Date.now() - startedAt);
+          return result;
+        } catch (error) {
+          lastError = error;
+          recordRpcResult(rpcUrl, false, Date.now() - startedAt, error);
+          logWarn("RPC request failed", {
+            rpcUrl,
+            path,
+            attempt,
+            maxAttempts: RPC_RETRIES,
+            error: formatError(error)
+          });
+        }
+      }
+
+      if (attempt < RPC_RETRIES) {
+        await sleep(RPC_RETRY_DELAY_MS * attempt);
       }
     }
 
-    if (attempt < RPC_RETRIES) {
-      await sleep(RPC_RETRY_DELAY_MS * attempt);
-    }
-  }
-
-  throw lastError instanceof Error ? lastError : new Error(`All RPC requests failed for ${path}`);
+    throw lastError instanceof Error ? lastError : new Error(`All RPC requests failed for ${path}`);
+  });
 }
 
 async function getLatestHeight(): Promise<number> {

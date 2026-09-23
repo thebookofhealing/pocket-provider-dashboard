@@ -9,6 +9,12 @@ const POCKET_REST_URL = "https://sauron-api.infra.pocket.network";
 export const IGNITER_REWARDS_QUERY = `query RewardsByDomains($domains: [String!]!, $startTs: Datetime!, $endTs: Datetime!) {
   rewards: getRewardsByDomainsAndTimeGroupByService(domains: $domains, startTs: $startTs, endTs: $endTs)
 }`;
+export const IGNITER_LATEST_BLOCK_QUERY = `query LatestBlock {
+  blocks(orderBy: ID_DESC, first: 1) { nodes { id timestamp } }
+}`;
+export const IGNITER_ALLOCATION_QUERY = `query SupplierMintAllocation {
+  allocation: param(id: "tokenomics-mint_allocation_percentages") { value }
+}`;
 
 export type PublicPlan = {
   id: string;
@@ -40,9 +46,11 @@ type IgniterRewardService = {
 };
 type IgniterRewardPayload = { services?: IgniterRewardService[] };
 type IgniterSource = {
-  status?: { lastProcessedTimestamp?: string | null };
+  sourceUpdatedAt?: string | null;
   allocation?: { value?: string | null } | null;
 };
+type IgniterLatestBlock = { blocks?: { nodes?: Array<{ id?: string | number; timestamp?: string | number | null }> } };
+type IgniterAllocation = { allocation?: { value?: string | null } | null };
 
 class StakingRefreshError extends Error {
   constructor(readonly stage: "source" | "rewards" | "minimum-stake" | "derive", cause: unknown) {
@@ -71,7 +79,42 @@ const LAST_KNOWN_GOOD: PublicPlan[] = [
 ].map(({ domain: _domain, ...plan }) => plan);
 
 let lastSuccessfulSnapshot: StakingPlansSnapshot | null = null;
+let lastServedSnapshot: StakingPlansSnapshot | null = null;
 type GraphQLResponse<T> = { data?: T; errors?: Array<{ message: string }> };
+
+export function extractLatestBlockTimestamp(source: IgniterLatestBlock): string | null {
+  const timestamp = source.blocks?.nodes?.[0]?.timestamp;
+  if (timestamp == null) return null;
+  // Igniter returns a timezone-less ISO timestamp, but it represents UTC.
+  // Appending Z avoids interpreting it as the server's local timezone.
+  const normalizedInput = typeof timestamp === "string" && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?$/.test(timestamp)
+    ? `${timestamp}Z`
+    : String(timestamp);
+  return normalizeSourceTimestamp(normalizedInput);
+}
+
+export function getStakingDiagnostics(): {
+  fetchedAt: string | null;
+  sourceUpdatedAt: string | null;
+  stale: boolean;
+  source: StakingPlansSnapshot["source"] | null;
+  staticFallbackActive: boolean;
+} {
+  const snapshot = lastServedSnapshot;
+  return {
+    fetchedAt: snapshot?.fetchedAt ?? null,
+    sourceUpdatedAt: snapshot?.sourceUpdatedAt ?? null,
+    stale: snapshot?.stale ?? true,
+    source: snapshot?.source ?? null,
+    staticFallbackActive: snapshot?.source === "last-known-good" && snapshot.sourceUpdatedAt == null
+  };
+}
+
+function isStakingSnapshotCacheFresh(snapshot: StakingPlansSnapshot, now: number): boolean {
+  const fetchedAt = new Date(snapshot.fetchedAt).getTime();
+  return !snapshot.stale && Number.isFinite(fetchedAt) && fetchedAt <= now && now - fetchedAt < REFRESH_INTERVAL_MS &&
+    isSourceFresh(snapshot.sourceUpdatedAt, now, REFRESH_INTERVAL_MS);
+}
 
 async function fetchGraphQL<T>(query: string, variables?: Record<string, unknown>): Promise<T> {
   const response = await fetch(IGNITER_GRAPHQL_URL, {
@@ -115,7 +158,7 @@ export function buildLivePlans(
   now = new Date(),
   metadata = PLAN_METADATA
 ): StakingPlansSnapshot {
-  const sourceUpdatedAt = normalizeSourceTimestamp(source.status?.lastProcessedTimestamp);
+  const sourceUpdatedAt = normalizeSourceTimestamp(source.sourceUpdatedAt);
   if (!isSourceFresh(sourceUpdatedAt, now.getTime(), REFRESH_INTERVAL_MS)) throw new Error("Pocket GraphQL reward source is stale");
   const allocationValue = source.allocation?.value;
   if (!allocationValue) throw new Error("Pocket GraphQL supplier allocation is unavailable");
@@ -157,17 +200,18 @@ export function buildLivePlans(
 
 async function fetchLivePlans(): Promise<StakingPlansSnapshot> {
   const now = new Date();
-  const sourceQuery = `query {
-    status: _metadata { lastProcessedTimestamp }
-    allocation: param(id: "tokenomics-mint_allocation_percentages") { value }
-  }`;
-  let source: IgniterSource;
+  let sourceUpdatedAt: string | null;
+  let allocation: IgniterAllocation["allocation"];
   try {
-    source = await fetchGraphQL<IgniterSource>(sourceQuery);
+    const [latestBlock, allocationResponse] = await Promise.all([
+      fetchGraphQL<IgniterLatestBlock>(IGNITER_LATEST_BLOCK_QUERY),
+      fetchGraphQL<IgniterAllocation>(IGNITER_ALLOCATION_QUERY)
+    ]);
+    sourceUpdatedAt = extractLatestBlockTimestamp(latestBlock);
+    allocation = allocationResponse.allocation;
   } catch (error) {
     throw new StakingRefreshError("source", error);
   }
-  const sourceUpdatedAt = normalizeSourceTimestamp(source.status?.lastProcessedTimestamp);
   if (!sourceUpdatedAt) throw new Error("Pocket GraphQL latest block timestamp is unavailable");
   const latestBlock = new Date(sourceUpdatedAt);
   const endTs = new Date(Date.UTC(latestBlock.getUTCFullYear(), latestBlock.getUTCMonth(), latestBlock.getUTCDate(), 23, 59, 59, 999));
@@ -190,17 +234,20 @@ async function fetchLivePlans(): Promise<StakingPlansSnapshot> {
     throw new StakingRefreshError("minimum-stake", error);
   }
   try {
-    return buildLivePlans(source, new Map(rewardEntries), minimumStake, now);
+    return buildLivePlans({ sourceUpdatedAt, allocation }, new Map(rewardEntries), minimumStake, now);
   } catch (error) {
     throw new StakingRefreshError("derive", error);
   }
 }
 
-async function loadStakingPlans(fetcher: () => Promise<StakingPlansSnapshot> = fetchLivePlans): Promise<StakingPlansSnapshot> {
-  const now = Date.now();
-  if (lastSuccessfulSnapshot && now - new Date(lastSuccessfulSnapshot.fetchedAt).getTime() < REFRESH_INTERVAL_MS) return lastSuccessfulSnapshot;
+async function loadStakingPlans(fetcher: () => Promise<StakingPlansSnapshot> = fetchLivePlans, now = Date.now()): Promise<StakingPlansSnapshot> {
+  if (lastSuccessfulSnapshot && isStakingSnapshotCacheFresh(lastSuccessfulSnapshot, now)) {
+    lastServedSnapshot = lastSuccessfulSnapshot;
+    return lastSuccessfulSnapshot;
+  }
   try {
     lastSuccessfulSnapshot = await fetcher();
+    lastServedSnapshot = lastSuccessfulSnapshot;
     return lastSuccessfulSnapshot;
   } catch (error) {
     const refreshError = error instanceof StakingRefreshError ? error : null;
@@ -211,8 +258,12 @@ async function loadStakingPlans(fetcher: () => Promise<StakingPlansSnapshot> = f
       sourceUpdatedAt: lastSuccessfulSnapshot?.sourceUpdatedAt ?? null,
       fetchedAt: lastSuccessfulSnapshot?.fetchedAt ?? null
     });
-    if (lastSuccessfulSnapshot) return { ...lastSuccessfulSnapshot, stale: true, source: "last-known-good" };
-    return { plans: LAST_KNOWN_GOOD, fetchedAt: new Date().toISOString(), sourceUpdatedAt: null, minimumSupplierStake: DEFAULT_POKT_PER_SUPPLIER, stale: true, source: "last-known-good" };
+    if (lastSuccessfulSnapshot) {
+      lastServedSnapshot = { ...lastSuccessfulSnapshot, stale: true, source: "last-known-good" };
+      return lastServedSnapshot;
+    }
+    lastServedSnapshot = { plans: LAST_KNOWN_GOOD, fetchedAt: new Date().toISOString(), sourceUpdatedAt: null, minimumSupplierStake: DEFAULT_POKT_PER_SUPPLIER, stale: true, source: "last-known-good" };
+    return lastServedSnapshot;
   }
 }
 
@@ -221,5 +272,5 @@ export const __testing = {
   fetchLivePlans,
   loadStakingPlans,
   buildLivePlans,
-  resetLastSuccessfulSnapshot: () => { lastSuccessfulSnapshot = null; }
+  resetLastSuccessfulSnapshot: () => { lastSuccessfulSnapshot = null; lastServedSnapshot = null; }
 };

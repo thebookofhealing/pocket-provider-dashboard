@@ -45,7 +45,7 @@ import {
   updateGraphQLWatermark
 } from "@/lib/graphql";
 import { DEFAULT_RPC_URLS } from "@/lib/rpc-status";
-import { aggregateEligibleSupplierCounts, isEligibleSupplierSnapshotFresh, type EligibleSupplierPage, type EligibleSupplierSnapshot } from "@/lib/eligible-suppliers";
+import { aggregateEligibleSupplierCounts, isEligibleSupplierSnapshotReusable, type EligibleSupplierPage, type EligibleSupplierSnapshot } from "@/lib/eligible-suppliers";
 
 type RpcEvent = {
   type: string;
@@ -622,9 +622,19 @@ function readEligibleSupplierSnapshot(): EligibleSupplierSnapshot | null {
   }
 }
 
+function saveEligibleSupplierDiagnostics(snapshot: EligibleSupplierSnapshot | null, stale: boolean, status: "fresh" | "last-known-good" | "failed"): void {
+  setIndexerState("eligible_supplier_diagnostics", JSON.stringify({
+    fetchedAt: snapshot?.fetchedAt ?? null,
+    stale,
+    serviceCount: snapshot ? Object.keys(snapshot.counts).length : 0,
+    status
+  }));
+}
+
 async function syncEligibleSupplierCounts(): Promise<{ snapshot: EligibleSupplierSnapshot | null; stale: boolean }> {
   const cached = readEligibleSupplierSnapshot();
-  if (cached && isEligibleSupplierSnapshotFresh(cached, Date.now())) {
+  if (cached && isEligibleSupplierSnapshotReusable(cached, knownServiceIds, Date.now())) {
+    saveEligibleSupplierDiagnostics(cached, false, "fresh");
     return { snapshot: cached, stale: false };
   }
 
@@ -635,6 +645,7 @@ async function syncEligibleSupplierCounts(): Promise<{ snapshot: EligibleSupplie
   const servicesSeen = new Set<string>();
   const startedAt = Date.now();
   try {
+    if (knownServiceIds.size === 0) throw new Error("eligible supplier refresh cannot certify counts without a service registry");
     while (true) {
       const search = new URLSearchParams({ dehydrated: "true", "pagination.limit": "250" });
       if (nextKey) search.set("pagination.key", nextKey);
@@ -654,6 +665,7 @@ async function syncEligibleSupplierCounts(): Promise<{ snapshot: EligibleSupplie
     const counts = aggregateEligibleSupplierCounts(pages, knownServiceIds);
     const snapshot = { counts, fetchedAt: new Date().toISOString() } satisfies EligibleSupplierSnapshot;
     setIndexerState("eligible_supplier_counts", JSON.stringify(snapshot));
+    saveEligibleSupplierDiagnostics(snapshot, false, "fresh");
     logInfo("Eligible supplier counts published", {
       pageCount,
       suppliersProcessed,
@@ -672,6 +684,7 @@ async function syncEligibleSupplierCounts(): Promise<{ snapshot: EligibleSupplie
       freshness: cached ? "last-known-good-stale" : "failed-no-snapshot",
       error: error instanceof Error ? error.message : String(error)
     });
+    saveEligibleSupplierDiagnostics(cached, true, cached ? "last-known-good" : "failed");
     return { snapshot: cached, stale: true };
   }
 }

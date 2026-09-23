@@ -6,9 +6,10 @@ import {
   SESSION_SUPPLIER_SLOTS
 } from "@/lib/opportunities";
 import { derivePlanEconomics, isSourceFresh, normalizeSourceTimestamp } from "@/lib/staking-economics";
-import { isEligibleSupplierSnapshotFresh, selectEligibleSupplierSnapshot } from "@/lib/eligible-suppliers";
-import { __testing as stakingTesting, IGNITER_REWARDS_QUERY } from "@/lib/staking-plans";
+import { isEligibleSupplierSnapshotComplete, isEligibleSupplierSnapshotFresh, isEligibleSupplierSnapshotReusable, selectEligibleSupplierSnapshot } from "@/lib/eligible-suppliers";
+import { __testing as stakingTesting, extractLatestBlockTimestamp, IGNITER_LATEST_BLOCK_QUERY, IGNITER_REWARDS_QUERY } from "@/lib/staking-plans";
 import { aggregateEligibleSupplierCounts } from "@/lib/eligible-suppliers";
+import { getDeployedSha } from "@/lib/deployment";
 
 assert.equal(getSelectionProbability(40, 1), 100, "all eligible suppliers fit within session slots");
 assert.equal(getSelectionProbability(100, 0), 0, "no entering suppliers has no selection probability");
@@ -18,6 +19,10 @@ assert.ok(getSelectionProbability(200, 1) < getSelectionProbability(100, 1), "in
 assert.equal(SESSION_SUPPLIER_SLOTS, 50);
 assert.match(IGNITER_REWARDS_QUERY, /\$domains: \[String!\]!/, "Igniter reward query requires a non-null domain list");
 assert.match(IGNITER_REWARDS_QUERY, /getRewardsByDomainsAndTimeGroupByService/, "Igniter reward query uses the supported resolver");
+assert.match(IGNITER_LATEST_BLOCK_QUERY, /blocks\(orderBy: ID_DESC, first: 1\)/, "Igniter freshness uses the latest block query");
+assert.equal(extractLatestBlockTimestamp({ blocks: { nodes: [{ id: "123", timestamp: "1790096400000" }] } }), "2026-09-22T17:00:00.000Z", "latest block timestamp is normalized");
+assert.equal(extractLatestBlockTimestamp({ blocks: { nodes: [{ id: "123", timestamp: "2026-09-23T02:55:27.173" }] } }), "2026-09-23T02:55:27.173Z", "timezone-less Igniter timestamps are treated as UTC");
+assert.equal(getDeployedSha({ GITHUB_SHA: "github-sha-test" }), "github-sha-test", "self-hosted deployment SHA uses GITHUB_SHA");
 
 const eligiblePages = [
   { supplier: [
@@ -30,6 +35,7 @@ const eligiblePages = [
   ] }
 ];
 assert.deepEqual(aggregateEligibleSupplierCounts(eligiblePages, new Set(["eth", "base"])), { eth: 2, base: 2 }, "dehydrated active services aggregate across pages and deduplicate operators");
+assert.deepEqual(aggregateEligibleSupplierCounts([{ supplier: [] }], new Set(["eth", "base"])), { eth: 0, base: 0 }, "known services with no active suppliers publish explicit zero counts");
 assert.throws(() => aggregateEligibleSupplierCounts([], new Set(["eth"])), /no pages/, "failed pagination cannot publish an empty snapshot");
 assert.throws(() => aggregateEligibleSupplierCounts([{ supplier: [{ operator_address: "operator-a", services: [{ service_id: "unknown" }] }] }], new Set(["eth"])), /known active services/, "an incomplete service snapshot is rejected");
 
@@ -53,6 +59,12 @@ const availableEligible = buildProviderServiceOpportunity({
 }, 1);
 assert.equal(availableEligible.eligibleSupplierCountAvailable, true, "a complete eligible snapshot enables calculator metrics");
 assert.ok(Number.isFinite(availableEligible.selectionProbability), "eligible snapshot produces finite selection odds");
+const zeroEligible = buildProviderServiceOpportunity({
+  serviceId: "zero", serviceName: "Zero", supplierCount: 10, eligibleSupplierCount: 0,
+  providerCount: 1, relays: 1, revenueUpokt: "1000000"
+}, 1);
+assert.equal(zeroEligible.eligibleSupplierCountAvailable, true, "zero eligible count remains an available metric");
+assert.ok(Number.isFinite(zeroEligible.selectionProbability), "zero eligible count produces finite calculator metrics");
 
 const economics = derivePlanEconomics(7_000_000, 50, 59_500);
 assert.equal(economics.grossDailyPokt, 1);
@@ -66,13 +78,21 @@ assert.equal(isSourceFresh(null, fresh), false);
 assert.equal(normalizeSourceTimestamp("1790096400000"), "2026-09-22T17:00:00.000Z");
 
 const eligibleSnapshot = { counts: { base: 12 }, fetchedAt: "2026-09-22T06:00:00.000Z" };
+const completeEligibleSnapshot = { counts: { base: 12, eth: 0 }, fetchedAt: "2026-09-22T06:00:00.000Z" };
+assert.equal(isEligibleSupplierSnapshotComplete(eligibleSnapshot, new Set(["base", "eth"])), false, "legacy snapshot without zero-count service is incomplete");
+assert.equal(isEligibleSupplierSnapshotComplete(completeEligibleSnapshot, new Set(["base", "eth"])), true, "complete snapshot is reusable when all services are present");
+assert.equal(isEligibleSupplierSnapshotComplete(completeEligibleSnapshot, new Set(["base", "eth", "new-service"])), false, "newly registered service invalidates an older snapshot");
+assert.equal(isEligibleSupplierSnapshotReusable(eligibleSnapshot, new Set(["base", "eth"]), fresh), false, "time-fresh incomplete snapshot cannot bypass refresh");
+assert.equal(isEligibleSupplierSnapshotReusable(completeEligibleSnapshot, new Set(["base", "eth"]), fresh), true, "time-fresh complete snapshot can bypass refresh");
+assert.equal(isEligibleSupplierSnapshotReusable(completeEligibleSnapshot, new Set(), fresh), false, "snapshot cannot be certified without a service registry");
 assert.equal(isEligibleSupplierSnapshotFresh(eligibleSnapshot, fresh), true);
 assert.equal(isEligibleSupplierSnapshotFresh(eligibleSnapshot, fresh + 6 * 60 * 60 * 1000 + 1), false);
 assert.deepEqual(selectEligibleSupplierSnapshot(eligibleSnapshot, null, fresh + 7 * 60 * 60 * 1000), { snapshot: eligibleSnapshot, stale: true });
+assert.deepEqual(selectEligibleSupplierSnapshot(eligibleSnapshot, null, fresh, new Set(["base", "eth"])), { snapshot: eligibleSnapshot, stale: true }, "failed refresh after incomplete cache remains stale/fail-closed");
 assert.deepEqual(selectEligibleSupplierSnapshot(eligibleSnapshot, { counts: { base: 13 }, fetchedAt: "2026-09-22T12:00:00.000Z" }, fresh), { snapshot: { counts: { base: 13 }, fetchedAt: "2026-09-22T12:00:00.000Z" }, stale: false });
 
 const snapshotSource = {
-  status: { lastProcessedTimestamp: "2026-09-22T11:55:00.000Z" },
+  sourceUpdatedAt: "2026-09-22T11:55:00.000Z",
   allocation: { value: JSON.stringify({ supplier: 0.8 }) }
 };
 const rewardFixture = new Map([[
@@ -112,7 +132,7 @@ const changedShareSnapshot = stakingTesting.buildLivePlans(
 assert.ok(Math.abs((changedShareSnapshot.plans[0]?.displayedYield ?? 0) - (25 + 5 / 7)) < 1e-9, "a refreshed client-share input changes the derived yield");
 
 assert.throws(() => stakingTesting.buildLivePlans(
-  { ...snapshotSource, status: { lastProcessedTimestamp: "2026-09-22T11:00:00.000Z" } },
+  { ...snapshotSource, sourceUpdatedAt: "2026-09-22T11:00:00.000Z" },
   rewardFixture,
   59_500,
   new Date("2026-09-22T12:00:00.000Z"),
@@ -139,13 +159,22 @@ assert.throws(() => stakingTesting.buildLivePlans(
 
 (async () => {
   stakingTesting.resetLastSuccessfulSnapshot();
-  const firstSnapshot = { ...liveSnapshot, fetchedAt: "2026-09-22T11:00:00.000Z" };
-  assert.equal((await stakingTesting.loadStakingPlans(async () => firstSnapshot)).source, "igniter-indexer");
-  const fallbackSnapshot = await stakingTesting.loadStakingPlans(async () => { throw new Error("source unavailable"); });
+  const cacheStart = Date.parse("2026-09-22T12:00:00.000Z");
+  const firstSnapshot = { ...liveSnapshot, fetchedAt: "2026-09-22T12:00:00.000Z", sourceUpdatedAt: "2026-09-22T11:50:00.000Z" };
+  assert.equal((await stakingTesting.loadStakingPlans(async () => firstSnapshot, cacheStart)).source, "igniter-indexer");
+  let refreshAttempted = false;
+  const refreshedSnapshot = { ...firstSnapshot, fetchedAt: "2026-09-22T12:06:00.000Z", sourceUpdatedAt: "2026-09-22T12:05:00.000Z" };
+  const refreshed = await stakingTesting.loadStakingPlans(async () => { refreshAttempted = true; return refreshedSnapshot; }, Date.parse("2026-09-22T12:06:00.000Z"));
+  assert.equal(refreshAttempted, true, "expired source freshness bypasses a locally fresh cache");
+  assert.equal(refreshed.stale, false, "a successful refresh restores live status");
+  stakingTesting.resetLastSuccessfulSnapshot();
+  const fallbackSeed = { ...liveSnapshot, fetchedAt: "2026-09-22T11:00:00.000Z", sourceUpdatedAt: "2026-09-22T11:00:00.000Z" };
+  assert.equal((await stakingTesting.loadStakingPlans(async () => fallbackSeed, Date.parse("2026-09-22T11:00:00.000Z"))).source, "igniter-indexer");
+  const fallbackSnapshot = await stakingTesting.loadStakingPlans(async () => { throw new Error("source unavailable"); }, Date.parse("2026-09-22T12:00:00.000Z"));
   assert.equal(fallbackSnapshot.source, "last-known-good", "source failure uses last-known-good data");
   assert.equal(fallbackSnapshot.stale, true, "source failure is surfaced as stale");
   stakingTesting.resetLastSuccessfulSnapshot();
-  const staticFallback = await stakingTesting.loadStakingPlans(async () => { throw new Error("initial source unavailable"); });
+  const staticFallback = await stakingTesting.loadStakingPlans(async () => { throw new Error("initial source unavailable"); }, cacheStart);
   assert.equal(staticFallback.source, "last-known-good", "static fallback is identified as last-known-good");
   assert.equal(staticFallback.stale, true, "static fallback is never live");
   console.log("protocol, eligible-count fail-closed, economics, and freshness tests passed");

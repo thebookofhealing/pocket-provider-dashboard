@@ -1,8 +1,26 @@
-import { getIndexerHealth, isDatabaseReadOnly } from "@/lib/db";
+import { getIndexerHealth, getIndexerState, isDatabaseReadOnly } from "@/lib/db";
 import { DEFAULT_INDEXER_STALE_AFTER_MS, getIndexerFreshness } from "@/lib/indexer-freshness";
 import { getCurrentBlockHeight } from "@/lib/rpc-status";
+import { getStakingDiagnostics } from "@/lib/staking-plans";
+import { getDeployedSha } from "@/lib/deployment";
 
 export const INDEXER_SYNC_LAG_THRESHOLD = 15;
+
+function readEligibleSupplierDiagnostics(): Record<string, unknown> {
+  const raw = getIndexerState("eligible_supplier_diagnostics");
+  if (!raw) return { fetchedAt: null, stale: true, serviceCount: 0, status: "unknown" };
+  try {
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    return {
+      fetchedAt: typeof parsed.fetchedAt === "string" ? parsed.fetchedAt : null,
+      stale: parsed.stale === true,
+      serviceCount: typeof parsed.serviceCount === "number" ? parsed.serviceCount : 0,
+      status: typeof parsed.status === "string" ? parsed.status : "unknown"
+    };
+  } catch {
+    return { fetchedAt: null, stale: true, serviceCount: 0, status: "invalid" };
+  }
+}
 
 export async function getDashboardHealth() {
   const health = getIndexerHealth();
@@ -56,6 +74,11 @@ export async function getDashboardHealth() {
       partialRewardHeights: health.partialRewardHeights,
       lastSuccessfulCommit: health.lastSuccessfulCommit,
       lastBackup: health.lastBackup
+    },
+    diagnostics: {
+      eligibleSuppliers: readEligibleSupplierDiagnostics(),
+      staking: getStakingDiagnostics(),
+      deployedSha: getDeployedSha()
     }
   };
 }

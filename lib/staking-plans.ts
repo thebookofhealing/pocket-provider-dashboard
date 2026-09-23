@@ -6,6 +6,10 @@ const REFRESH_INTERVAL_MS = 15 * 60 * 1000;
 const IGNITER_GRAPHQL_URL = "https://data.pocket.network/";
 const POCKET_REST_URL = "https://sauron-api.infra.pocket.network";
 
+export const IGNITER_REWARDS_QUERY = `query RewardsByDomains($domains: [String!]!, $startTs: Datetime!, $endTs: Datetime!) {
+  rewards: getRewardsByDomainsAndTimeGroupByService(domains: $domains, startTs: $startTs, endTs: $endTs)
+}`;
+
 export type PublicPlan = {
   id: string;
   provider: string;
@@ -39,6 +43,13 @@ type IgniterSource = {
   status?: { lastProcessedTimestamp?: string | null };
   allocation?: { value?: string | null } | null;
 };
+
+class StakingRefreshError extends Error {
+  constructor(readonly stage: "source" | "rewards" | "minimum-stake" | "derive", cause: unknown) {
+    super(cause instanceof Error ? cause.message : String(cause));
+    this.name = "StakingRefreshError";
+  }
+}
 
 // Igniter's public UI does not expose an unauthenticated plan-status endpoint.
 // Keep plan terms explicit, but source reward economics and the protocol minimum
@@ -150,23 +161,39 @@ async function fetchLivePlans(): Promise<StakingPlansSnapshot> {
     status: _metadata { lastProcessedTimestamp }
     allocation: param(id: "tokenomics-mint_allocation_percentages") { value }
   }`;
-  const source = await fetchGraphQL<IgniterSource>(sourceQuery);
+  let source: IgniterSource;
+  try {
+    source = await fetchGraphQL<IgniterSource>(sourceQuery);
+  } catch (error) {
+    throw new StakingRefreshError("source", error);
+  }
   const sourceUpdatedAt = normalizeSourceTimestamp(source.status?.lastProcessedTimestamp);
   if (!sourceUpdatedAt) throw new Error("Pocket GraphQL latest block timestamp is unavailable");
   const latestBlock = new Date(sourceUpdatedAt);
   const endTs = new Date(Date.UTC(latestBlock.getUTCFullYear(), latestBlock.getUTCMonth(), latestBlock.getUTCDate(), 23, 59, 59, 999));
   const startTs = new Date(Date.UTC(latestBlock.getUTCFullYear(), latestBlock.getUTCMonth(), latestBlock.getUTCDate() - 6, 0, 0, 0, 0));
-  const rewardsQuery = `query($domains: [String!], $startTs: Datetime!, $endTs: Datetime!) {
-    rewards: getRewardsByDomainsAndTimeGroupByService(domains: $domains, startTs: $startTs, endTs: $endTs)
-  }`;
-  const rewardEntries = await Promise.all(PLAN_METADATA.map(async (metadata) => {
-    const data = await fetchGraphQL<{ rewards?: IgniterRewardPayload }>(rewardsQuery, {
-      domains: [metadata.domain], startTs: startTs.toISOString(), endTs: endTs.toISOString()
-    });
-    return [metadata.domain, data.rewards?.services ?? []] as const;
-  }));
-  const minimumStake = await fetchMinimumSupplierStake();
-  return buildLivePlans(source, new Map(rewardEntries), minimumStake, now);
+  let rewardEntries: Array<readonly [string, IgniterRewardService[]]>;
+  try {
+    rewardEntries = await Promise.all(PLAN_METADATA.map(async (metadata) => {
+      const data = await fetchGraphQL<{ rewards?: IgniterRewardPayload }>(IGNITER_REWARDS_QUERY, {
+        domains: [metadata.domain], startTs: startTs.toISOString(), endTs: endTs.toISOString()
+      });
+      return [metadata.domain, data.rewards?.services ?? []] as const;
+    }));
+  } catch (error) {
+    throw new StakingRefreshError("rewards", error);
+  }
+  let minimumStake: number;
+  try {
+    minimumStake = await fetchMinimumSupplierStake();
+  } catch (error) {
+    throw new StakingRefreshError("minimum-stake", error);
+  }
+  try {
+    return buildLivePlans(source, new Map(rewardEntries), minimumStake, now);
+  } catch (error) {
+    throw new StakingRefreshError("derive", error);
+  }
 }
 
 async function loadStakingPlans(fetcher: () => Promise<StakingPlansSnapshot> = fetchLivePlans): Promise<StakingPlansSnapshot> {
@@ -175,7 +202,15 @@ async function loadStakingPlans(fetcher: () => Promise<StakingPlansSnapshot> = f
   try {
     lastSuccessfulSnapshot = await fetcher();
     return lastSuccessfulSnapshot;
-  } catch {
+  } catch (error) {
+    const refreshError = error instanceof StakingRefreshError ? error : null;
+    console.warn("[pocket-dashboard:staking] live refresh failed", {
+      stage: refreshError?.stage ?? "unknown",
+      error: error instanceof Error ? error.message : String(error),
+      fallback: lastSuccessfulSnapshot ? "last-known-good" : "static-last-known-good",
+      sourceUpdatedAt: lastSuccessfulSnapshot?.sourceUpdatedAt ?? null,
+      fetchedAt: lastSuccessfulSnapshot?.fetchedAt ?? null
+    });
     if (lastSuccessfulSnapshot) return { ...lastSuccessfulSnapshot, stale: true, source: "last-known-good" };
     return { plans: LAST_KNOWN_GOOD, fetchedAt: new Date().toISOString(), sourceUpdatedAt: null, minimumSupplierStake: DEFAULT_POKT_PER_SUPPLIER, stale: true, source: "last-known-good" };
   }

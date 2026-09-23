@@ -7,7 +7,8 @@ import {
 } from "@/lib/opportunities";
 import { derivePlanEconomics, isSourceFresh, normalizeSourceTimestamp } from "@/lib/staking-economics";
 import { isEligibleSupplierSnapshotFresh, selectEligibleSupplierSnapshot } from "@/lib/eligible-suppliers";
-import { __testing as stakingTesting } from "@/lib/staking-plans";
+import { __testing as stakingTesting, IGNITER_REWARDS_QUERY } from "@/lib/staking-plans";
+import { aggregateEligibleSupplierCounts } from "@/lib/eligible-suppliers";
 
 assert.equal(getSelectionProbability(40, 1), 100, "all eligible suppliers fit within session slots");
 assert.equal(getSelectionProbability(100, 0), 0, "no entering suppliers has no selection probability");
@@ -15,6 +16,22 @@ assert.ok(Math.abs(getSelectionProbability(100, 1) - (50 / 101 * 100)) < 1e-9, "
 assert.ok(getSelectionProbability(100, 2) > getSelectionProbability(100, 1), "increasing M cannot decrease probability");
 assert.ok(getSelectionProbability(200, 1) < getSelectionProbability(100, 1), "increasing E cannot increase probability");
 assert.equal(SESSION_SUPPLIER_SLOTS, 50);
+assert.match(IGNITER_REWARDS_QUERY, /\$domains: \[String!\]!/, "Igniter reward query requires a non-null domain list");
+assert.match(IGNITER_REWARDS_QUERY, /getRewardsByDomainsAndTimeGroupByService/, "Igniter reward query uses the supported resolver");
+
+const eligiblePages = [
+  { supplier: [
+    { operator_address: "operator-a", services: [{ service_id: "eth" }, { service_id: "base" }] },
+    { operator_address: "operator-a", services: [{ service_id: "eth" }] }
+  ] },
+  { supplier: [
+    { operator_address: "operator-b", services: [{ service_id: "eth" }] },
+    { operator_address: "operator-c", services: [{ service_id: "base" }] }
+  ] }
+];
+assert.deepEqual(aggregateEligibleSupplierCounts(eligiblePages, new Set(["eth", "base"])), { eth: 2, base: 2 }, "dehydrated active services aggregate across pages and deduplicate operators");
+assert.throws(() => aggregateEligibleSupplierCounts([], new Set(["eth"])), /no pages/, "failed pagination cannot publish an empty snapshot");
+assert.throws(() => aggregateEligibleSupplierCounts([{ supplier: [{ operator_address: "operator-a", services: [{ service_id: "unknown" }] }] }], new Set(["eth"])), /known active services/, "an incomplete service snapshot is rejected");
 
 const missingEligible = buildProviderServiceOpportunity({
   serviceId: "missing",
@@ -25,6 +42,17 @@ const missingEligible = buildProviderServiceOpportunity({
 }, 1);
 assert.equal(missingEligible.eligibleSupplierCountAvailable, false, "missing eligible counts are explicit");
 assert.equal(missingEligible.selectionProbability, 0, "missing eligible counts fail closed");
+const availableEligible = buildProviderServiceOpportunity({
+  serviceId: "available",
+  serviceName: "Available",
+  supplierCount: 999,
+  eligibleSupplierCount: 12,
+  providerCount: 1,
+  relays: 1,
+  revenueUpokt: "1000000"
+}, 1);
+assert.equal(availableEligible.eligibleSupplierCountAvailable, true, "a complete eligible snapshot enables calculator metrics");
+assert.ok(Number.isFinite(availableEligible.selectionProbability), "eligible snapshot produces finite selection odds");
 
 const economics = derivePlanEconomics(7_000_000, 50, 59_500);
 assert.equal(economics.grossDailyPokt, 1);

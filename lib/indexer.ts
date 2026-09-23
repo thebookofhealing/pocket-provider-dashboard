@@ -45,7 +45,7 @@ import {
   updateGraphQLWatermark
 } from "@/lib/graphql";
 import { DEFAULT_RPC_URLS } from "@/lib/rpc-status";
-import { isEligibleSupplierSnapshotFresh, type EligibleSupplierSnapshot } from "@/lib/eligible-suppliers";
+import { aggregateEligibleSupplierCounts, isEligibleSupplierSnapshotFresh, type EligibleSupplierPage, type EligibleSupplierSnapshot } from "@/lib/eligible-suppliers";
 
 type RpcEvent = {
   type: string;
@@ -191,6 +191,7 @@ const HASH_SALT = process.env.POCKET_INDEXER_HASH_SALT ?? "pocket-dashboard-publ
 const RETENTION_DAYS = Number(process.env.POCKET_INDEXER_RETENTION_DAYS ?? 45);
 const CACHE_INTERVAL_MS = Number(process.env.POCKET_INDEXER_CACHE_INTERVAL_MS ?? 30_000);
 const RPC_TIMEOUT_MS = Number(process.env.POCKET_INDEXER_RPC_TIMEOUT_MS ?? 8_000);
+const ELIGIBLE_SUPPLIER_TIMEOUT_MS = Number(process.env.POCKET_INDEXER_ELIGIBLE_SUPPLIER_TIMEOUT_MS ?? 30_000);
 const RPC_RETRIES = Number(process.env.POCKET_INDEXER_RPC_RETRIES ?? 3);
 const RPC_RETRY_DELAY_MS = Number(process.env.POCKET_INDEXER_RPC_RETRY_DELAY_MS ?? 500);
 const WS_IDLE_TIMEOUT_MS = Number(process.env.POCKET_INDEXER_WS_IDLE_TIMEOUT_MS ?? 45_000);
@@ -224,6 +225,7 @@ const SESSION_FRESHNESS_MS = 60 * 60 * 1000;
 const INDEXER_DATA_VERSION = 4;
 const rpcStats = new Map<string, { successes: number; failures: number; timeouts: number; totalLatencyMs: number }>();
 let rpcRequestTail = Promise.resolve();
+let knownServiceIds = new Set<string>();
 
 function logInfo(message: string, context?: Record<string, unknown>): void {
   console.info(`[pocket-dashboard:indexer] ${message}`, context ?? "");
@@ -562,6 +564,7 @@ async function syncServices(): Promise<void> {
     }
 
     saveIndexedServices(services);
+    knownServiceIds = new Set(services.map((service) => service.serviceId));
     logInfo("Service dimension synced", { serviceCount: services.length });
   } catch (error) {
     logWarn("Service dimension sync failed; existing labels will be reused", { error: error instanceof Error ? error.message : String(error) });
@@ -625,33 +628,50 @@ async function syncEligibleSupplierCounts(): Promise<{ snapshot: EligibleSupplie
     return { snapshot: cached, stale: false };
   }
 
-  const countsByService = new Map<string, Set<string>>();
+  const pages: EligibleSupplierPage[] = [];
   let nextKey = "";
+  let pageCount = 0;
+  let suppliersProcessed = 0;
+  const servicesSeen = new Set<string>();
+  const startedAt = Date.now();
   try {
     while (true) {
-      const search = new URLSearchParams({ dehydrated: "false", "pagination.limit": "250" });
+      const search = new URLSearchParams({ dehydrated: "true", "pagination.limit": "250" });
       if (nextKey) search.set("pagination.key", nextKey);
-      const response = await fetchJson<RestSuppliersResponse>(`${REST_URL.replace(/\/$/, "")}/pokt-network/poktroll/supplier/supplier?${search.toString()}`);
+      const response = await fetchJson<RestSuppliersResponse>(`${REST_URL.replace(/\/$/, "")}/pokt-network/poktroll/supplier/supplier?${search.toString()}`, ELIGIBLE_SUPPLIER_TIMEOUT_MS);
+      pages.push(response);
+      pageCount += 1;
+      suppliersProcessed += response.supplier?.length ?? 0;
       for (const supplier of response.supplier ?? []) {
-        if (!supplier.operator_address) continue;
         for (const service of supplier.services ?? []) {
-          if (!service.service_id) continue;
-          const operators = countsByService.get(service.service_id) ?? new Set<string>();
-          operators.add(supplier.operator_address);
-          countsByService.set(service.service_id, operators);
+          if (service.service_id) servicesSeen.add(service.service_id);
         }
       }
       nextKey = response.pagination?.next_key ?? "";
       if (!nextKey) break;
     }
 
-    const counts = Object.fromEntries(Array.from(countsByService.entries()).map(([serviceId, operators]) => [serviceId, operators.size]));
+    const counts = aggregateEligibleSupplierCounts(pages, knownServiceIds);
     const snapshot = { counts, fetchedAt: new Date().toISOString() } satisfies EligibleSupplierSnapshot;
     setIndexerState("eligible_supplier_counts", JSON.stringify(snapshot));
-    logInfo("Eligible supplier counts published", { serviceCount: Object.keys(counts).length, fetchedAt: snapshot.fetchedAt });
+    logInfo("Eligible supplier counts published", {
+      pageCount,
+      suppliersProcessed,
+      serviceCount: Object.keys(counts).length,
+      fetchDurationMs: Date.now() - startedAt,
+      fetchedAt: snapshot.fetchedAt,
+      freshness: "fresh"
+    });
     return { snapshot, stale: false };
   } catch (error) {
-    logWarn("Eligible supplier count refresh failed; retaining last-known snapshot", { error: error instanceof Error ? error.message : String(error) });
+    logWarn("Eligible supplier count refresh failed; retaining last-known snapshot", {
+      pageCount,
+      suppliersProcessed,
+      serviceCount: servicesSeen.size,
+      fetchDurationMs: Date.now() - startedAt,
+      freshness: cached ? "last-known-good-stale" : "failed-no-snapshot",
+      error: error instanceof Error ? error.message : String(error)
+    });
     return { snapshot: cached, stale: true };
   }
 }

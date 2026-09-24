@@ -26,6 +26,7 @@ import {
   saveIndexedBlock,
   migrateV3ToV4,
   saveIndexedServices,
+  getIndexedServiceIds,
   saveIndexedSupplierDomains,
   setDashboardCache,
   setIndexerState,
@@ -45,7 +46,9 @@ import {
   updateGraphQLWatermark
 } from "@/lib/graphql";
 import { DEFAULT_RPC_URLS } from "@/lib/rpc-status";
-import { aggregateEligibleSupplierCounts, isEligibleSupplierSnapshotReusable, type EligibleSupplierPage, type EligibleSupplierSnapshot } from "@/lib/eligible-suppliers";
+import { aggregateEligibleSupplierCounts, parseEligibleSupplierSnapshot, type EligibleSupplierPage, type EligibleSupplierSnapshot } from "@/lib/eligible-suppliers";
+import { resolveEligibleSupplierCounts, type EligibleSupplierCountsSnapshot } from "@/lib/eligible-supplier-source";
+import { ELIGIBLE_SUPPLIER_SNAPSHOT_SCHEMA_VERSION, DASHBOARD_CACHE_SCHEMA_VERSION } from "@/lib/cache-contract";
 
 type RpcEvent = {
   type: string;
@@ -99,12 +102,37 @@ type RestSuppliersResponse = {
   pagination?: { next_key?: string | null };
 };
 
+type PoktscanEligibleSupplierConfigsResponse = {
+  data?: {
+    supplierServiceConfigs?: {
+      nodes?: Array<{ serviceId?: string | null; supplierId?: string | null } | null>;
+      pageInfo?: { hasNextPage?: boolean; endCursor?: string | null } | null;
+    } | null;
+  };
+};
+
+// This connection is the current supplier-service configuration table, not a
+// historical reward/event stream. Its complete pagination pass is therefore
+// the GraphQL equivalent of the REST active supplier enumeration.
+const ELIGIBLE_SUPPLIER_CONFIGS_QUERY = `query CurrentSupplierServiceConfigs($after: Cursor) {
+  supplierServiceConfigs(first: 1000, after: $after) {
+    nodes { serviceId supplierId }
+    pageInfo { hasNextPage endCursor }
+  }
+}`;
+
 type RewardDistributionDetail = {
   op_reason: string;
   amount: string;
 };
 
 type SerializedDashboardCache = {
+  dashboardSchemaVersion: typeof DASHBOARD_CACHE_SCHEMA_VERSION;
+  eligibleSupplierSnapshotSchemaVersion: typeof ELIGIBLE_SUPPLIER_SNAPSHOT_SCHEMA_VERSION;
+  eligibleSupplierSnapshotComplete: true;
+  eligibleSupplierSnapshotFetchedAt: string;
+  eligibleSupplierSnapshotStale: boolean;
+  eligibleSupplierSnapshotSource: EligibleSupplierCountsSnapshot["source"];
   window: TimeWindow;
   generatedAt: string;
   dataSource: "rpc";
@@ -191,7 +219,11 @@ const HASH_SALT = process.env.POCKET_INDEXER_HASH_SALT ?? "pocket-dashboard-publ
 const RETENTION_DAYS = Number(process.env.POCKET_INDEXER_RETENTION_DAYS ?? 45);
 const CACHE_INTERVAL_MS = Number(process.env.POCKET_INDEXER_CACHE_INTERVAL_MS ?? 30_000);
 const RPC_TIMEOUT_MS = Number(process.env.POCKET_INDEXER_RPC_TIMEOUT_MS ?? 8_000);
+const SERVICE_SYNC_TIMEOUT_MS = Number(process.env.POCKET_INDEXER_SERVICE_SYNC_TIMEOUT_MS ?? 15_000);
+const SERVICE_SYNC_RETRIES = Number(process.env.POCKET_INDEXER_SERVICE_SYNC_RETRIES ?? 3);
+const SERVICE_SYNC_RETRY_DELAY_MS = Number(process.env.POCKET_INDEXER_SERVICE_SYNC_RETRY_DELAY_MS ?? 750);
 const ELIGIBLE_SUPPLIER_TIMEOUT_MS = Number(process.env.POCKET_INDEXER_ELIGIBLE_SUPPLIER_TIMEOUT_MS ?? 30_000);
+const POKTSCAN_URL = process.env.POCKETSCAN_API_URL ?? "https://data.pocket.network/";
 const RPC_RETRIES = Number(process.env.POCKET_INDEXER_RPC_RETRIES ?? 3);
 const RPC_RETRY_DELAY_MS = Number(process.env.POCKET_INDEXER_RPC_RETRY_DELAY_MS ?? 500);
 const WS_IDLE_TIMEOUT_MS = Number(process.env.POCKET_INDEXER_WS_IDLE_TIMEOUT_MS ?? 45_000);
@@ -226,6 +258,18 @@ const INDEXER_DATA_VERSION = 4;
 const rpcStats = new Map<string, { successes: number; failures: number; timeouts: number; totalLatencyMs: number }>();
 let rpcRequestTail = Promise.resolve();
 let knownServiceIds = new Set<string>();
+
+function hydrateKnownServiceRegistry(): void {
+  const persistedServiceIds = getIndexedServiceIds();
+  if (persistedServiceIds.length > 0) {
+    knownServiceIds = new Set(persistedServiceIds);
+    setIndexerState("service_registry_diagnostics", JSON.stringify({
+      source: "persisted-lkg",
+      knownServiceCount: knownServiceIds.size,
+      refreshedAt: new Date().toISOString()
+    }));
+  }
+}
 
 function logInfo(message: string, context?: Record<string, unknown>): void {
   console.info(`[pocket-dashboard:indexer] ${message}`, context ?? "");
@@ -315,13 +359,15 @@ function wsUrlFromRpc(rpcUrl: string): string {
   return url.toString();
 }
 
-async function fetchJson<T>(url: string, timeoutMs = RPC_TIMEOUT_MS): Promise<T> {
+async function fetchJson<T>(url: string, timeoutMs = RPC_TIMEOUT_MS, options?: RequestInit): Promise<T> {
   const response = await fetch(url, {
+    ...options,
     cache: "no-store",
     headers: {
       accept: "application/json",
-      "user-agent": "pocket-dashboard/1.0"
-    },
+      "user-agent": "pocket-dashboard/1.0",
+      ...(options?.headers ?? {})
+    } as HeadersInit,
     signal: AbortSignal.timeout(timeoutMs)
   });
   if (!response.ok) {
@@ -544,31 +590,62 @@ function parseMaybeNumber(value: string | number | null | undefined): number | n
 }
 
 async function syncServices(): Promise<void> {
-  const services: IndexedService[] = [];
-  let nextKey = "";
-
-  try {
-    while (true) {
-      const search = new URLSearchParams({ dehydrated: "true", "pagination.limit": "250" });
-      if (nextKey) search.set("pagination.key", nextKey);
-      const response = await fetchJson<RestServicesResponse>(`${REST_URL.replace(/\/$/, "")}/pokt-network/poktroll/service/service?${search.toString()}`);
-      for (const service of response.service ?? []) {
-        services.push({
-          serviceId: service.id,
-          serviceName: service.name || service.id,
-          computeUnitsPerRelay: parseMaybeNumber(service.computeUnitsPerRelay ?? service.compute_units_per_relay)
-        });
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= Math.max(1, SERVICE_SYNC_RETRIES); attempt += 1) {
+    const services: IndexedService[] = [];
+    let nextKey = "";
+    try {
+      while (true) {
+        const search = new URLSearchParams({ dehydrated: "true", "pagination.limit": "250" });
+        if (nextKey) search.set("pagination.key", nextKey);
+        const response = await fetchJson<RestServicesResponse>(`${REST_URL.replace(/\/$/, "")}/pokt-network/poktroll/service/service?${search.toString()}`, SERVICE_SYNC_TIMEOUT_MS);
+        for (const service of response.service ?? []) {
+          services.push({
+            serviceId: service.id,
+            serviceName: service.name || service.id,
+            computeUnitsPerRelay: parseMaybeNumber(service.computeUnitsPerRelay ?? service.compute_units_per_relay)
+          });
+        }
+        nextKey = response.pagination?.next_key ?? "";
+        if (!nextKey) break;
       }
-      nextKey = response.pagination?.next_key ?? "";
-      if (!nextKey) break;
-    }
 
-    saveIndexedServices(services);
-    knownServiceIds = new Set(services.map((service) => service.serviceId));
-    logInfo("Service dimension synced", { serviceCount: services.length });
-  } catch (error) {
-    logWarn("Service dimension sync failed; existing labels will be reused", { error: error instanceof Error ? error.message : String(error) });
+      if (services.length === 0) throw new Error("service registry returned no services");
+      saveIndexedServices(services);
+      knownServiceIds = new Set(services.map((service) => service.serviceId));
+      setIndexerState("service_registry_diagnostics", JSON.stringify({
+        source: "live",
+        knownServiceCount: knownServiceIds.size,
+        refreshedAt: new Date().toISOString(),
+        attempt
+      }));
+      logInfo("Service dimension synced", { serviceCount: services.length, attempt });
+      return;
+    } catch (error) {
+      lastError = error;
+      if (attempt < Math.max(1, SERVICE_SYNC_RETRIES)) await sleep(SERVICE_SYNC_RETRY_DELAY_MS * attempt);
+    }
   }
+
+  const persistedServiceIds = getIndexedServiceIds();
+  if (persistedServiceIds.length > 0) {
+    knownServiceIds = new Set(persistedServiceIds);
+    setIndexerState("service_registry_diagnostics", JSON.stringify({
+      source: "persisted-lkg",
+      knownServiceCount: knownServiceIds.size,
+      refreshedAt: new Date().toISOString(),
+      reason: lastError instanceof Error ? lastError.message : String(lastError)
+    }));
+    logWarn("Service dimension sync failed; using persisted registry", { knownServiceCount: knownServiceIds.size, error: lastError instanceof Error ? lastError.message : String(lastError) });
+    return;
+  }
+  setIndexerState("service_registry_diagnostics", JSON.stringify({
+    source: "unavailable",
+    knownServiceCount: 0,
+    refreshedAt: new Date().toISOString(),
+    reason: lastError instanceof Error ? lastError.message : String(lastError)
+  }));
+  logWarn("Service dimension sync failed and no persisted registry is available", { error: lastError instanceof Error ? lastError.message : String(lastError) });
 }
 
 async function syncSupplierDomains(): Promise<void> {
@@ -614,78 +691,146 @@ function readEligibleSupplierSnapshot(): EligibleSupplierSnapshot | null {
   const raw = getIndexerState("eligible_supplier_counts");
   if (!raw) return null;
   try {
-    const parsed = JSON.parse(raw) as Partial<EligibleSupplierSnapshot>;
-    if (!parsed.counts || typeof parsed.counts !== "object" || typeof parsed.fetchedAt !== "string") return null;
-    return { counts: parsed.counts as Record<string, number>, fetchedAt: parsed.fetchedAt };
+    return parseEligibleSupplierSnapshot(JSON.parse(raw));
   } catch {
     return null;
   }
 }
 
-function saveEligibleSupplierDiagnostics(snapshot: EligibleSupplierSnapshot | null, stale: boolean, status: "fresh" | "last-known-good" | "failed"): void {
+function getServiceRegistryDiagnosticSource(): string {
+  const raw = getIndexerState("service_registry_diagnostics");
+  if (!raw) return "unknown";
+  try {
+    const parsed = JSON.parse(raw) as { source?: unknown };
+    return typeof parsed.source === "string" ? parsed.source : "unknown";
+  } catch {
+    return "unknown";
+  }
+}
+
+function saveEligibleSupplierDiagnostics(snapshot: EligibleSupplierSnapshot | null, stale: boolean, status: "fresh" | "last-known-good" | "failed", source: EligibleSupplierCountsSnapshot["source"] | "unknown", reason?: string): void {
   setIndexerState("eligible_supplier_diagnostics", JSON.stringify({
+    schemaVersion: snapshot?.schemaVersion ?? ELIGIBLE_SUPPLIER_SNAPSHOT_SCHEMA_VERSION,
+    complete: snapshot?.complete === true,
     fetchedAt: snapshot?.fetchedAt ?? null,
     stale,
+    source,
+    serviceRegistrySource: getServiceRegistryDiagnosticSource(),
+    knownServiceCount: knownServiceIds.size,
+    countedServiceCount: snapshot ? Object.keys(snapshot.counts).length : 0,
     serviceCount: snapshot ? Object.keys(snapshot.counts).length : 0,
-    status
+    status,
+    reason: reason ?? null
   }));
 }
 
-async function syncEligibleSupplierCounts(): Promise<{ snapshot: EligibleSupplierSnapshot | null; stale: boolean }> {
-  const cached = readEligibleSupplierSnapshot();
-  if (cached && isEligibleSupplierSnapshotReusable(cached, knownServiceIds, Date.now())) {
-    saveEligibleSupplierDiagnostics(cached, false, "fresh");
-    return { snapshot: cached, stale: false };
-  }
-
+async function fetchIndexerRestEligibleSupplierCounts(knownIds: ReadonlySet<string>): Promise<EligibleSupplierCountsSnapshot> {
+  if (knownIds.size === 0) throw new Error("eligible supplier refresh cannot certify counts without a service registry");
   const pages: EligibleSupplierPage[] = [];
   let nextKey = "";
-  let pageCount = 0;
-  let suppliersProcessed = 0;
-  const servicesSeen = new Set<string>();
+  while (true) {
+    const search = new URLSearchParams({ dehydrated: "true", "pagination.limit": "250" });
+    if (nextKey) search.set("pagination.key", nextKey);
+    const response = await fetchJson<RestSuppliersResponse>(`${REST_URL.replace(/\/$/, "")}/pokt-network/poktroll/supplier/supplier?${search.toString()}`, ELIGIBLE_SUPPLIER_TIMEOUT_MS);
+    pages.push(response);
+    nextKey = response.pagination?.next_key ?? "";
+    if (!nextKey) break;
+  }
+  return {
+    schemaVersion: ELIGIBLE_SUPPLIER_SNAPSHOT_SCHEMA_VERSION,
+    complete: true,
+    counts: aggregateEligibleSupplierCounts(pages, knownIds),
+    fetchedAt: new Date().toISOString(),
+    stale: false,
+    source: "rest"
+  };
+}
+
+async function fetchIndexerGraphqlEligibleSupplierCounts(knownIds: ReadonlySet<string>): Promise<EligibleSupplierCountsSnapshot> {
+  if (knownIds.size === 0) throw new Error("GraphQL eligible supplier fallback requires a service registry");
+  let after: string | null = null;
+  const supplierIdsByService = new Map<string, Set<string>>();
+  for (let page = 0; page < 20; page += 1) {
+    const response: PoktscanEligibleSupplierConfigsResponse = await fetchJson<PoktscanEligibleSupplierConfigsResponse>(POKTSCAN_URL, ELIGIBLE_SUPPLIER_TIMEOUT_MS, {
+      method: "POST",
+      headers: { accept: "application/json", "content-type": "application/json" },
+      body: JSON.stringify({ query: ELIGIBLE_SUPPLIER_CONFIGS_QUERY, variables: { after } })
+    });
+    const connection: NonNullable<PoktscanEligibleSupplierConfigsResponse["data"]>["supplierServiceConfigs"] = response.data?.supplierServiceConfigs;
+    if (!connection) throw new Error("data.pocket.network returned no supplier service config connection");
+    for (const node of connection.nodes ?? []) {
+      if (!node?.serviceId || !node.supplierId || !knownIds.has(node.serviceId)) continue;
+      const supplierIds = supplierIdsByService.get(node.serviceId) ?? new Set<string>();
+      supplierIds.add(node.supplierId);
+      supplierIdsByService.set(node.serviceId, supplierIds);
+    }
+    if (connection.pageInfo?.hasNextPage !== true) {
+      return {
+        schemaVersion: ELIGIBLE_SUPPLIER_SNAPSHOT_SCHEMA_VERSION,
+        complete: true,
+        counts: Object.fromEntries(Array.from(knownIds).map((serviceId) => [serviceId, supplierIdsByService.get(serviceId)?.size ?? 0])),
+        fetchedAt: new Date().toISOString(),
+        stale: false,
+        source: "poktscan-graphql"
+      };
+    }
+    after = connection.pageInfo.endCursor ?? null;
+    if (!after) throw new Error("data.pocket.network supplier service config pagination did not complete");
+  }
+  throw new Error("data.pocket.network supplier service config pagination exceeded limit");
+}
+
+async function syncEligibleSupplierCounts(): Promise<{ snapshot: EligibleSupplierCountsSnapshot | null; stale: boolean }> {
+  const cached = readEligibleSupplierSnapshot();
+  const diagnosticRaw = getIndexerState("eligible_supplier_diagnostics");
+  let cachedSource: EligibleSupplierCountsSnapshot["source"] = "persisted-lkg";
+  if (diagnosticRaw) {
+    try {
+      const source = (JSON.parse(diagnosticRaw) as { source?: unknown }).source;
+      if (source === "rest" || source === "poktscan-graphql" || source === "persisted-lkg") cachedSource = source;
+    } catch {
+      // A corrupt diagnostic must not prevent the source refresh.
+    }
+  }
+  const cachedWithSource = cached ? { ...cached, stale: false, source: cachedSource } : null;
   const startedAt = Date.now();
   try {
-    if (knownServiceIds.size === 0) throw new Error("eligible supplier refresh cannot certify counts without a service registry");
-    while (true) {
-      const search = new URLSearchParams({ dehydrated: "true", "pagination.limit": "250" });
-      if (nextKey) search.set("pagination.key", nextKey);
-      const response = await fetchJson<RestSuppliersResponse>(`${REST_URL.replace(/\/$/, "")}/pokt-network/poktroll/supplier/supplier?${search.toString()}`, ELIGIBLE_SUPPLIER_TIMEOUT_MS);
-      pages.push(response);
-      pageCount += 1;
-      suppliersProcessed += response.supplier?.length ?? 0;
-      for (const supplier of response.supplier ?? []) {
-        for (const service of supplier.services ?? []) {
-          if (service.service_id) servicesSeen.add(service.service_id);
-        }
+    const resolved = await resolveEligibleSupplierCounts(
+      knownServiceIds,
+      cachedWithSource,
+      cached,
+      {
+        rest: () => fetchIndexerRestEligibleSupplierCounts(knownServiceIds),
+        graphql: () => fetchIndexerGraphqlEligibleSupplierCounts(knownServiceIds)
       }
-      nextKey = response.pagination?.next_key ?? "";
-      if (!nextKey) break;
+    );
+    if (resolved.source === "rest" || resolved.source === "poktscan-graphql") {
+      // Publish only complete fresh upstream snapshots; stale LKGs never
+      // overwrite the canonical materialized source.
+      setIndexerState("eligible_supplier_counts", JSON.stringify({
+        schemaVersion: resolved.schemaVersion,
+        complete: resolved.complete,
+        counts: resolved.counts,
+        fetchedAt: resolved.fetchedAt
+      } satisfies EligibleSupplierSnapshot));
     }
-
-    const counts = aggregateEligibleSupplierCounts(pages, knownServiceIds);
-    const snapshot = { counts, fetchedAt: new Date().toISOString() } satisfies EligibleSupplierSnapshot;
-    setIndexerState("eligible_supplier_counts", JSON.stringify(snapshot));
-    saveEligibleSupplierDiagnostics(snapshot, false, "fresh");
-    logInfo("Eligible supplier counts published", {
-      pageCount,
-      suppliersProcessed,
-      serviceCount: Object.keys(counts).length,
+    saveEligibleSupplierDiagnostics(resolved, resolved.stale, resolved.stale ? "last-known-good" : "fresh", resolved.source);
+    logInfo("Eligible supplier counts resolved", {
+      source: resolved.source,
+      stale: resolved.stale,
+      serviceCount: Object.keys(resolved.counts).length,
       fetchDurationMs: Date.now() - startedAt,
-      fetchedAt: snapshot.fetchedAt,
-      freshness: "fresh"
+      fetchedAt: resolved.fetchedAt
     });
-    return { snapshot, stale: false };
+    return { snapshot: resolved, stale: resolved.stale };
   } catch (error) {
-    logWarn("Eligible supplier count refresh failed; retaining last-known snapshot", {
-      pageCount,
-      suppliersProcessed,
-      serviceCount: servicesSeen.size,
+    logWarn("Eligible supplier count refresh failed; no complete snapshot is available", {
       fetchDurationMs: Date.now() - startedAt,
-      freshness: cached ? "last-known-good-stale" : "failed-no-snapshot",
+      freshness: "failed-no-snapshot",
       error: error instanceof Error ? error.message : String(error)
     });
-    saveEligibleSupplierDiagnostics(cached, true, cached ? "last-known-good" : "failed");
-    return { snapshot: cached, stale: true };
+    saveEligibleSupplierDiagnostics(cached, true, "failed", cached ? cachedSource : "unknown", error instanceof Error ? error.message : String(error));
+    return { snapshot: null, stale: true };
   }
 }
 
@@ -976,6 +1121,9 @@ export async function rebuildIndexerCaches(): Promise<void> {
     const latestFact = getLatestIndexedFact();
     const poktPriceUsd = await refreshPrice();
     const eligibleSupplierSnapshot = await syncEligibleSupplierCounts();
+    if (!eligibleSupplierSnapshot.snapshot) {
+      throw new Error("eligible supplier snapshot unavailable; dashboard materialization remains warming");
+    }
     const liveSuppliersPerSession = sessionSyncedSlots ?? SESSION_SUPPLIER_SLOTS;
     const liveAppsStaked = sessionSyncedAppsStaked ?? {};
     const oldestFetchedAt = [sessionSuppliersFetchedAt, sessionAppsFetchedAt]
@@ -1031,6 +1179,12 @@ export async function rebuildIndexerCaches(): Promise<void> {
         chains: [] as []
       }));
       const payload: SerializedDashboardCache = {
+        dashboardSchemaVersion: DASHBOARD_CACHE_SCHEMA_VERSION,
+        eligibleSupplierSnapshotSchemaVersion: eligibleSupplierSnapshot.snapshot.schemaVersion,
+        eligibleSupplierSnapshotComplete: eligibleSupplierSnapshot.snapshot.complete,
+        eligibleSupplierSnapshotFetchedAt: eligibleSupplierSnapshot.snapshot.fetchedAt,
+        eligibleSupplierSnapshotStale: eligibleSupplierSnapshot.stale,
+        eligibleSupplierSnapshotSource: eligibleSupplierSnapshot.snapshot.source,
         window,
         generatedAt: new Date().toISOString(),
         dataSource: "rpc",
@@ -1740,6 +1894,7 @@ export async function runIndexer(options: IndexerOptions = {}): Promise<void> {
   process.on("SIGTERM", () => { releaseIndexerLock(); process.exit(0); });
 
   warmupSessionState();
+  hydrateKnownServiceRegistry();
 
   try {
     logInfo("Starting Pocket indexer", options as Record<string, unknown>);

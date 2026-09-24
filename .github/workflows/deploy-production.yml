@@ -36,3 +36,11 @@ jobs:
           KEEP_RELEASES: "5"
           HEALTH_URL: http://127.0.0.1:3100/api/health
         run: bash scripts/deploy-production.sh
+
+      - name: Verify production data contract
+        if: success()
+        env:
+          LOCAL_BASE_URL: http://127.0.0.1:3100
+          EXPECTED_SHA: ${{ github.sha }}
+          PUBLIC_HEALTH_URL: https://pocket-providers.kleomed.es/api/health
+        run: bash scripts/verify-production-data.sh

@@ -1,6 +1,6 @@
 import { cache } from "react";
 
-import { finishJobRun, getCachedSettlementBlocks, getDashboardCache, getIndexerState, getMeta, isDatabaseReadOnly, saveSettlementBlock, setDashboardCache, setMeta, startJobRun } from "@/lib/db";
+import { finishJobRun, getCachedSettlementBlocks, getDashboardCache, getIndexedServiceIds, getIndexerState, getMeta, isDatabaseReadOnly, saveSettlementBlock, setDashboardCache, setMeta, startJobRun } from "@/lib/db";
 import { getDevelopmentDashboardData, getDevelopmentNetworkDailyHistory, getDevelopmentServiceDailyHistory, isDevelopmentDummyDataEnabled } from "@/lib/dev-fixtures";
 import { SESSION_SUPPLIER_SLOTS } from "@/lib/opportunities";
 import { PROVIDER_DOMAIN_LABEL_OVERRIDES, SUPPLIER_PROVIDER_OVERRIDES } from "@/lib/provider-overrides";
@@ -18,6 +18,9 @@ import type {
   SupplierMember,
   TimeWindow
 } from "@/lib/types";
+import { isEligibleSupplierSnapshotReusable, parseEligibleSupplierSnapshot, type EligibleSupplierSnapshot } from "@/lib/eligible-suppliers";
+import { resolveEligibleSupplierCounts, type EligibleSupplierCountsSnapshot } from "@/lib/eligible-supplier-source";
+import { DASHBOARD_CACHE_SCHEMA_VERSION, ELIGIBLE_SUPPLIER_SNAPSHOT_SCHEMA_VERSION, hasCompleteEligibleSupplierCounts } from "@/lib/cache-contract";
 
 type RpcEvent = {
   type: string;
@@ -351,6 +354,11 @@ function isMarkedNonRetryable(error: unknown): boolean {
 }
 
 type SerializedDashboardCache = Omit<DashboardData, "totalRevenueUpokt" | "providers" | "services"> & {
+  dashboardSchemaVersion: typeof DASHBOARD_CACHE_SCHEMA_VERSION;
+  eligibleSupplierSnapshotSchemaVersion: typeof ELIGIBLE_SUPPLIER_SNAPSHOT_SCHEMA_VERSION;
+  eligibleSupplierSnapshotComplete: boolean;
+  eligibleSupplierSnapshotFetchedAt: string;
+  eligibleSupplierSnapshotStale: boolean;
   totalRevenueUpokt: string;
   providers: Array<Omit<ProviderStats, "revenueUpokt" | "chains" | "suppliers"> & {
     revenueUpokt: string;
@@ -361,6 +369,22 @@ type SerializedDashboardCache = Omit<DashboardData, "totalRevenueUpokt" | "provi
 };
 
 type ServiceSupplierCounts = Record<string, number>;
+
+const ELIGIBLE_SUPPLIER_CONFIGS_QUERY = `query EligibleSupplierConfigs($after: Cursor) {
+  supplierServiceConfigs(first: 1000, after: $after) {
+    nodes { serviceId supplierId }
+    pageInfo { hasNextPage endCursor }
+  }
+}`;
+
+type PoktscanEligibleSupplierConfigsResponse = {
+  data?: {
+    supplierServiceConfigs?: {
+      nodes?: Array<{ serviceId?: string | null; supplierId?: string | null } | null>;
+      pageInfo?: { hasNextPage?: boolean; endCursor?: string | null } | null;
+    } | null;
+  };
+};
 
 type PoktscanClaimAggregate = {
   keys?: string[] | null;
@@ -993,6 +1017,11 @@ function summarizeRevShare(entries: SupplierRevShare[] | undefined, ownerAddress
 function serializeDashboardData(data: DashboardData): SerializedDashboardCache {
   return {
     ...data,
+    dashboardSchemaVersion: (data.dashboardSchemaVersion ?? DASHBOARD_CACHE_SCHEMA_VERSION) as typeof DASHBOARD_CACHE_SCHEMA_VERSION,
+    eligibleSupplierSnapshotSchemaVersion: (data.eligibleSupplierSnapshotSchemaVersion ?? ELIGIBLE_SUPPLIER_SNAPSHOT_SCHEMA_VERSION) as typeof ELIGIBLE_SUPPLIER_SNAPSHOT_SCHEMA_VERSION,
+    eligibleSupplierSnapshotComplete: data.eligibleSupplierSnapshotComplete === true,
+    eligibleSupplierSnapshotFetchedAt: data.eligibleSupplierSnapshotFetchedAt ?? "",
+    eligibleSupplierSnapshotStale: data.eligibleSupplierSnapshotStale === true,
     totalRevenueUpokt: data.totalRevenueUpokt.toString(),
     providers: data.providers.map((provider) => ({
       ...provider,
@@ -1229,9 +1258,18 @@ function setCachedPoktscanSupplierDirectory(directory: SupplierDirectory): void 
   } satisfies SupplierDirectoryCachePayload));
 }
 
-function hasServiceSupplierCounts(data: DashboardData | null | undefined): data is DashboardData {
-  if (!data) return false;
-  return data.services.every((service) => typeof service.supplierCount === "number");
+function hasCompatibleDashboardCache(data: DashboardData | null | undefined): data is DashboardData {
+  if (!data || data.dashboardSchemaVersion !== DASHBOARD_CACHE_SCHEMA_VERSION || data.eligibleSupplierSnapshotSchemaVersion !== ELIGIBLE_SUPPLIER_SNAPSHOT_SCHEMA_VERSION || data.eligibleSupplierSnapshotComplete !== true || typeof data.eligibleSupplierSnapshotFetchedAt !== "string" || typeof data.eligibleSupplierSnapshotStale !== "boolean" || typeof data.eligibleSupplierSnapshotSource !== "string" || data.services.length === 0) return false;
+  return hasCompleteEligibleSupplierCounts(data.services);
+}
+
+function hasCompatibleSerializedDashboardCache(data: SerializedDashboardCache): boolean {
+  return data.dashboardSchemaVersion === DASHBOARD_CACHE_SCHEMA_VERSION &&
+    data.eligibleSupplierSnapshotSchemaVersion === ELIGIBLE_SUPPLIER_SNAPSHOT_SCHEMA_VERSION &&
+    data.eligibleSupplierSnapshotComplete === true &&
+    typeof data.eligibleSupplierSnapshotFetchedAt === "string" &&
+    typeof data.eligibleSupplierSnapshotStale === "boolean" &&
+    typeof data.eligibleSupplierSnapshotSource === "string";
 }
 
 function hydrateDashboardCache(window: TimeWindow): DashboardData | null {
@@ -1241,10 +1279,12 @@ function hydrateDashboardCache(window: TimeWindow): DashboardData | null {
   }
 
   try {
-    const data = deserializeDashboardData(JSON.parse(persisted.payloadJson) as SerializedDashboardCache);
-    if (!hasServiceSupplierCounts(data)) {
+    const serialized = JSON.parse(persisted.payloadJson) as SerializedDashboardCache;
+    if (!hasCompatibleSerializedDashboardCache(serialized)) {
       return null;
     }
+    const data = deserializeDashboardData(serialized);
+    if (!hasCompatibleDashboardCache(data)) return null;
     dashboardCache.set(window, {
       data,
       expiresAt: Date.now() + UI_MEMORY_CACHE_TTL_MS
@@ -1266,7 +1306,7 @@ function persistDashboard(window: TimeWindow, data: DashboardData): DashboardDat
 
 function getCachedDashboardSnapshot(window: TimeWindow): DashboardData | null {
   const cached = dashboardCache.get(window);
-  if (cached && cached.expiresAt > Date.now() && hasServiceSupplierCounts(cached.data)) {
+  if (cached && cached.expiresAt > Date.now() && hasCompatibleDashboardCache(cached.data)) {
     return cached.data;
   }
 
@@ -1364,41 +1404,94 @@ const getSupplierDirectory = cache(async (): Promise<SupplierDirectory> => {
 });
 
 const SERVICE_SUPPLIER_COUNTS_TTL_MS = 6 * 60 * 60 * 1000;
-let serviceSupplierCountsCache: { value: ServiceSupplierCounts; fetchedAt: string } | null = null;
+let serviceSupplierCountsCache: EligibleSupplierCountsSnapshot | null = null;
 
-const getServiceSupplierCounts = async (): Promise<ServiceSupplierCounts> => {
-  if (serviceSupplierCountsCache && Date.now() - new Date(serviceSupplierCountsCache.fetchedAt).getTime() < SERVICE_SUPPLIER_COUNTS_TTL_MS) {
-    return serviceSupplierCountsCache.value;
+async function getGraphqlEligibleSupplierCounts(knownServiceIds: ReadonlySet<string>): Promise<EligibleSupplierCountsSnapshot> {
+  if (knownServiceIds.size === 0) throw new Error("GraphQL eligible supplier fallback requires a service registry");
+  const supplierIdsByService = new Map<string, Set<string>>();
+  let after: string | null = null;
+  let pageCount = 0;
+  while (true) {
+    const response: PoktscanEligibleSupplierConfigsResponse = await fetchPoktscan<PoktscanEligibleSupplierConfigsResponse>(ELIGIBLE_SUPPLIER_CONFIGS_QUERY, { after });
+    const connection: NonNullable<NonNullable<PoktscanEligibleSupplierConfigsResponse["data"]>["supplierServiceConfigs"]> | undefined = response.data?.supplierServiceConfigs ?? undefined;
+    if (!connection) throw new Error("data.pocket.network returned no supplier service config connection");
+    for (const node of connection.nodes ?? []) {
+      if (!node?.serviceId || !node.supplierId || !knownServiceIds.has(node.serviceId)) continue;
+      const supplierIds = supplierIdsByService.get(node.serviceId) ?? new Set<string>();
+      supplierIds.add(node.supplierId);
+      supplierIdsByService.set(node.serviceId, supplierIds);
+    }
+    pageCount += 1;
+    const hasNextPage = connection.pageInfo?.hasNextPage === true;
+    const nextCursor: string | null = connection.pageInfo?.endCursor ?? null;
+    if (!hasNextPage) break;
+    if (!nextCursor || pageCount >= 20) throw new Error("data.pocket.network supplier service config pagination did not complete");
+    after = nextCursor;
+  }
+
+  const counts = Object.fromEntries(Array.from(knownServiceIds).map((serviceId) => [serviceId, supplierIdsByService.get(serviceId)?.size ?? 0]));
+  return {
+    schemaVersion: ELIGIBLE_SUPPLIER_SNAPSHOT_SCHEMA_VERSION,
+    complete: true,
+    counts,
+    fetchedAt: new Date().toISOString(),
+    stale: false,
+    source: "poktscan-graphql"
+  };
+}
+
+async function fetchRestEligibleSupplierCounts(knownServiceIds: ReadonlySet<string>): Promise<EligibleSupplierCountsSnapshot> {
+  if (knownServiceIds.size === 0) throw new Error("eligible supplier counts cannot be certified without a service registry");
+  const counts: ServiceSupplierCounts = Object.fromEntries(Array.from(knownServiceIds).map((serviceId) => [serviceId, 0]));
+  let nextKey = "";
+  while (true) {
+    const search = new URLSearchParams({ dehydrated: "false", "pagination.limit": "200" });
+    if (nextKey) search.set("pagination.key", nextKey);
+    const response = await fetchJson<SuppliersResponse>(`${DEFAULT_REST_URL}${SUPPLIERS_PATH}?${search.toString()}`);
+    for (const supplier of response.supplier ?? []) {
+      const activeServiceIds = new Set((supplier.services ?? []).map((service) => service.service_id).filter((serviceId): serviceId is string => Boolean(serviceId)));
+      for (const serviceId of activeServiceIds) {
+        if (knownServiceIds.has(serviceId)) counts[serviceId] = (counts[serviceId] ?? 0) + 1;
+      }
+    }
+    nextKey = response.pagination?.next_key ?? "";
+    if (!nextKey) break;
+  }
+  return {
+    schemaVersion: ELIGIBLE_SUPPLIER_SNAPSHOT_SCHEMA_VERSION,
+    complete: true,
+    counts,
+    fetchedAt: new Date().toISOString(),
+    stale: false,
+    source: "rest"
+  };
+}
+
+const getServiceSupplierCounts = async (): Promise<EligibleSupplierCountsSnapshot> => {
+  const knownServiceIds = new Set(getIndexedServiceIds());
+  let persisted: EligibleSupplierSnapshot | null = null;
+  const persistedRaw = getIndexerState("eligible_supplier_counts");
+  if (persistedRaw) {
+    try { persisted = parseEligibleSupplierSnapshot(JSON.parse(persistedRaw)); } catch { persisted = null; }
   }
   try {
-    const counts: ServiceSupplierCounts = {};
-    let nextKey = "";
-    while (true) {
-      const search = new URLSearchParams({ dehydrated: "false", "pagination.limit": "200" });
-      if (nextKey) search.set("pagination.key", nextKey);
-      const response = await fetchJson<SuppliersResponse>(`${DEFAULT_REST_URL}${SUPPLIERS_PATH}?${search.toString()}`);
-      for (const supplier of response.supplier ?? []) {
-        const activeServiceIds = new Set((supplier.services ?? []).map((service) => service.service_id).filter((serviceId): serviceId is string => Boolean(serviceId)));
-        for (const serviceId of activeServiceIds) counts[serviceId] = (counts[serviceId] ?? 0) + 1;
+    serviceSupplierCountsCache = await resolveEligibleSupplierCounts(
+      knownServiceIds,
+      serviceSupplierCountsCache,
+      persisted,
+      {
+        rest: () => fetchRestEligibleSupplierCounts(knownServiceIds),
+        graphql: () => getGraphqlEligibleSupplierCounts(knownServiceIds)
       }
-      nextKey = response.pagination?.next_key ?? "";
-      if (!nextKey) break;
-    }
-    serviceSupplierCountsCache = { value: counts, fetchedAt: new Date().toISOString() };
-    return counts;
+    );
   } catch (error) {
-    const persisted = getIndexerState("eligible_supplier_counts");
-    if (persisted) {
-      try {
-        const parsed = JSON.parse(persisted) as { counts?: ServiceSupplierCounts; fetchedAt?: string };
-        if (parsed.counts && parsed.fetchedAt) {
-          serviceSupplierCountsCache = { value: parsed.counts, fetchedAt: parsed.fetchedAt };
-          return parsed.counts;
-        }
-      } catch { /* fall through to the original error */ }
-    }
+    logDataWarning("Eligible supplier REST and GraphQL sources failed", { error: getErrorMessage(error) });
     throw error;
   }
+  if (serviceSupplierCountsCache.source === "poktscan-graphql") {
+    logDataInfo("Eligible supplier counts served from data.pocket.network GraphQL fallback", { fetchedAt: serviceSupplierCountsCache.fetchedAt });
+  }
+  return serviceSupplierCountsCache;
 };
 
 const getPoktscanSupplierDirectory = cache(async (): Promise<SupplierDirectory> => {
@@ -1576,7 +1669,7 @@ function buildDashboardFromProviderRows(
   window: TimeWindow,
   latestHeight: number,
   rows: ProviderAggregateRow[],
-  serviceSupplierCounts: ServiceSupplierCounts,
+  serviceSupplierCounts: EligibleSupplierCountsSnapshot,
   supplierDirectory: SupplierDirectory,
   poktPriceUsd: number,
   options?: {
@@ -1734,8 +1827,9 @@ function buildDashboardFromProviderRows(
   for (const service of serviceMap.values()) {
     service.providerCount = providers.filter((provider) => provider.chains.some((chain) => chain.serviceId === service.serviceId)).length;
     service.supplierCount = historicalSupplierSets.get(service.serviceId)?.size ?? 0;
-    service.eligibleSupplierCount = serviceSupplierCounts[service.serviceId] ?? 0;
-    service.eligibleSupplierCountFetchedAt = serviceSupplierCountsCache?.fetchedAt;
+    service.eligibleSupplierCount = serviceSupplierCounts.counts[service.serviceId];
+    service.eligibleSupplierCountFetchedAt = serviceSupplierCounts.fetchedAt;
+    service.eligibleSupplierCountStale = serviceSupplierCounts.stale;
   }
 
   const services = Array.from(serviceMap.values()).sort((a, b) =>
@@ -1743,6 +1837,12 @@ function buildDashboardFromProviderRows(
   );
 
   return {
+    dashboardSchemaVersion: DASHBOARD_CACHE_SCHEMA_VERSION,
+    eligibleSupplierSnapshotSchemaVersion: serviceSupplierCounts.schemaVersion,
+    eligibleSupplierSnapshotComplete: serviceSupplierCounts.complete,
+    eligibleSupplierSnapshotFetchedAt: serviceSupplierCounts.fetchedAt,
+    eligibleSupplierSnapshotStale: serviceSupplierCounts.stale,
+    eligibleSupplierSnapshotSource: serviceSupplierCounts.source,
     window,
     generatedAt: new Date().toISOString(),
     dataSource: options?.dataSource ?? "rpc",
@@ -1777,7 +1877,7 @@ function buildDashboard(
   window: TimeWindow,
   latestHeight: number,
   settlements: SettlementEvent[],
-  serviceSupplierCounts: ServiceSupplierCounts,
+  serviceSupplierCounts: EligibleSupplierCountsSnapshot,
   supplierDirectory: SupplierDirectory,
   poktPriceUsd: number,
   sessionData?: {
@@ -1915,8 +2015,9 @@ function buildDashboard(
   for (const service of serviceMap.values()) {
     service.providerCount = providers.filter((provider) => provider.chains.some((chain) => chain.serviceId === service.serviceId)).length;
     service.supplierCount = historicalSupplierSets.get(service.serviceId)?.size ?? 0;
-    service.eligibleSupplierCount = serviceSupplierCounts[service.serviceId] ?? 0;
-    service.eligibleSupplierCountFetchedAt = serviceSupplierCountsCache?.fetchedAt;
+    service.eligibleSupplierCount = serviceSupplierCounts.counts[service.serviceId];
+    service.eligibleSupplierCountFetchedAt = serviceSupplierCounts.fetchedAt;
+    service.eligibleSupplierCountStale = serviceSupplierCounts.stale;
   }
 
   const services = Array.from(serviceMap.values()).sort((a, b) =>
@@ -1925,6 +2026,12 @@ function buildDashboard(
   const settlementTimes = settlements.map((settlement) => settlement.blockTime).sort();
 
   return {
+    dashboardSchemaVersion: DASHBOARD_CACHE_SCHEMA_VERSION,
+    eligibleSupplierSnapshotSchemaVersion: serviceSupplierCounts.schemaVersion,
+    eligibleSupplierSnapshotComplete: serviceSupplierCounts.complete,
+    eligibleSupplierSnapshotFetchedAt: serviceSupplierCounts.fetchedAt,
+    eligibleSupplierSnapshotStale: serviceSupplierCounts.stale,
+    eligibleSupplierSnapshotSource: serviceSupplierCounts.source,
     window,
     generatedAt: new Date().toISOString(),
     dataSource: "rpc",
@@ -2279,7 +2386,7 @@ async function loadDashboard(window: TimeWindow): Promise<DashboardData> {
     return hydrated ? dashboardCache.get(window) : undefined;
   })();
 
-  if (hasServiceSupplierCounts(cached?.data)) {
+  if (hasCompatibleDashboardCache(cached?.data)) {
     if (cached.expiresAt <= Date.now()) {
       void refreshDashboard(window);
     }

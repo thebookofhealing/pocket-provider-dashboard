@@ -3,9 +3,9 @@
 import { useMemo, useState, useDeferredValue } from "react";
 
 import { formatCompactNumber, formatDecimal, formatInteger, formatUpokt } from "@/lib/format";
+import { hasCompleteEligibleSupplierCounts } from "@/lib/cache-contract";
 import {
-  allocateSuppliersByMarginalReturn,
-  buildAllocatedServiceOpportunity,
+  buildProviderServiceOpportunity,
   DEFAULT_NEW_PROVIDER_SUPPLIERS,
   SESSION_SUPPLIER_SLOTS
 } from "@/lib/opportunities";
@@ -62,17 +62,13 @@ export default function RevenueCalculator({ services, suppliersPerSession, sessi
     const selected = new Set(selectedIds);
     return eligibleServices.filter((service) => selected.has(service.serviceId));
   }, [eligibleServices, selectedIds]);
-  const eligibleCountsReady = selectedServices.length > 0 && selectedServices.every((service) => service.eligibleSupplierCount != null && !service.eligibleSupplierCountStale);
+  const eligibleCountsReady = hasCompleteEligibleSupplierCounts(selectedServices);
   const eligibleCountFetchedAt = selectedServices.map((service) => service.eligibleSupplierCountFetchedAt).filter((value): value is string => Boolean(value)).sort()[0];
-
-  const supplierAllocation = useMemo(() => {
-    return allocateSuppliersByMarginalReturn(selectedServices, supplierCount);
-  }, [selectedServices, supplierCount]);
 
   const selectedRevenueUpokt = selectedServices.reduce((sum, service) => sum + BigInt(service.revenueUpokt), 0n);
   const selectedRelays = selectedServices.reduce((sum, service) => sum + service.relays, 0);
   const serviceOpportunities = selectedServices.map((service) =>
-    buildAllocatedServiceOpportunity(service, supplierCount, supplierAllocation.get(service.serviceId) ?? 0, { sessionSlots: liveSuppliersPerSession, appsStaked: service.appsStaked })
+    buildProviderServiceOpportunity(service, supplierCount, { sessionSlots: liveSuppliersPerSession, appsStaked: service.appsStaked })
   );
   const projectedEntryUpokt = serviceOpportunities.reduce((sum, service) => sum + service.equalShareRevenueEstimateUpokt, 0n);
   const selectedChainCount = selectedServices.length;
@@ -196,16 +192,16 @@ export default function RevenueCalculator({ services, suppliersPerSession, sessi
             </div>
 
             <div className="calculator-meta-card">
-              <span className="hero-highlight-label">Selection Odds</span>
+              <span className="hero-highlight-label">Average Selection Odds</span>
               <strong className="accent-number" style={{ color: 'var(--accent)' }}>{eligibleCountsReady ? `${formatDecimal(averageSelectionProbability, 0)}%` : "Unavailable"}</strong>
-              <p>Averaged across selected chains.</p>
+              <p>Average per-chain session selection probability.</p>
             </div>
 
             <div className="calculator-meta-card calculator-quick-facts">
               <span className="hero-highlight-label">Quick Facts</span>
               <ul>
                 <li>Projections are based on the number of suppliers per chain and historical rewards data, therefore it is not a guarantee of future rewards.</li>
-                <li>Calculator assumes your suppliers are distributed across all selected chains to maximize yield.</li>
+                <li>Each modeled supplier serves every selected chain; Pocket suppliers can serve multiple services simultaneously.</li>
                 <li>If you are a new provider, the foundation may supply you with more or less than 15 suppliers.</li>
                 <li>Supplier selection is protocol-driven, but gateway QoS/routing can influence how much traffic selected suppliers actually receive and therefore can affect realized earnings.</li>
               </ul>
@@ -254,6 +250,9 @@ export default function RevenueCalculator({ services, suppliersPerSession, sessi
                       <span>{formatInteger(service.providerCount)} providers</span>
                       <span>{service.eligibleSupplierCount == null ? "Eligible count unavailable" : `${formatInteger(service.eligibleSupplierCount)} eligible suppliers`}</span>
                       <span>{formatCompactNumber(service.relays)} relays</span>
+                      {checked && eligibleCountsReady && (
+                        <span>{formatDecimal(serviceOpportunities.find((opportunity) => opportunity.serviceId === service.serviceId)?.selectionProbability ?? 0, 0)}% selection odds</span>
+                      )}
                     </div>
                   </div>
                 </label>

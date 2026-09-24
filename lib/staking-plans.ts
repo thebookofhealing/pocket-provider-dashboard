@@ -16,6 +16,9 @@ export const IGNITER_ALLOCATION_QUERY = `query SupplierMintAllocation {
   allocation: param(id: "tokenomics-mint_allocation_percentages") { value }
 }`;
 
+export type RewardStatus = "live" | "stale" | "unavailable";
+export type PlanValueSource = "live-derived" | "stale-derived" | "provider-lkg" | "static-cold-start";
+
 export type PublicPlan = {
   id: string;
   provider: string;
@@ -25,6 +28,11 @@ export type PublicPlan = {
   displayedYield: number;
   termsVerifiedAt: string;
   website?: string;
+  rewardStatus: RewardStatus;
+  valueSource: PlanValueSource;
+  sourceUpdatedAt: string | null;
+  fetchedAt: string;
+  diagnosticReason?: string;
 };
 
 export type StakingPlansSnapshot = {
@@ -34,9 +42,17 @@ export type StakingPlansSnapshot = {
   minimumSupplierStake: number;
   stale: boolean;
   source: "igniter-indexer" | "last-known-good";
+  allocationStatus: "live" | "stale" | "unavailable";
+  minimumStakeStatus: "live" | "stale" | "unavailable";
 };
 
-type ProviderPlanMetadata = Omit<PublicPlan, "apr" | "displayedYield"> & {
+type ProviderPlanMetadata = {
+  id: string;
+  provider: string;
+  plan: string;
+  clientShare: number;
+  termsVerifiedAt: string;
+  website?: string;
   domain: string;
   clientSharesByService?: Record<string, number>;
 };
@@ -65,21 +81,35 @@ class StakingRefreshError extends Error {
 const PLAN_METADATA: ProviderPlanMetadata[] = [
   { id: "kleomedes-public", provider: "Kleomedes", plan: "Public", clientShare: 49, termsVerifiedAt: "2026-09-22", domain: "kleomedes.cloud", website: "https://kleomedes.cloud" },
   { id: "kalorius-public", provider: "Kalorius.tech", plan: "public staking", clientShare: 20, termsVerifiedAt: "2026-09-22", domain: "kalorius.tech", website: "https://kalorius.tech/" },
-  { id: "nodefleet-public", provider: "Nodefleet", plan: "Nodefleet-Public", clientShare: 75, termsVerifiedAt: "2026-09-22", domain: "nodefleet.org", website: "https://nodefleet.org/" },
+  { id: "nodefleet-public", provider: "Nodefleet", plan: "Nodefleet-Public", clientShare: 75, termsVerifiedAt: "2026-09-22", domain: "nodefleet.net", website: "https://nodefleet.org/" },
   { id: "purroofgroup-public", provider: "purroofgroup", plan: "sv1-default", clientShare: 78, termsVerifiedAt: "2026-09-22", domain: "purroofgroup.com", website: "https://www.purroofgroup.com/" },
   { id: "easy2stake-public", provider: "Easy2stake", plan: "igniter-1-eu-a", clientShare: 50, termsVerifiedAt: "2026-09-22", domain: "easy2stake.com", website: "https://www.easy2stake.com/" }
 ];
 
-const LAST_KNOWN_GOOD: PublicPlan[] = [
+function getPlanDomain(planId: string): string | null {
+  return PLAN_METADATA.find((metadata) => metadata.id === planId)?.domain ?? null;
+}
+
+const LAST_KNOWN_GOOD = [
   { ...PLAN_METADATA[0], apr: 65.3, displayedYield: 107.32 },
   { ...PLAN_METADATA[1], apr: 40.7, displayedYield: 66.95 },
   { ...PLAN_METADATA[2], apr: 28.4, displayedYield: 46.64 },
   { ...PLAN_METADATA[3], apr: 18.8, displayedYield: 30.92 },
   { ...PLAN_METADATA[4], apr: 13.5, displayedYield: 22.19 }
-].map(({ domain: _domain, ...plan }) => plan);
+].map(({ domain: _domain, ...plan }) => ({
+  ...plan,
+  rewardStatus: "unavailable" as const,
+  valueSource: "static-cold-start" as const,
+  sourceUpdatedAt: null,
+  fetchedAt: "",
+  diagnosticReason: "no live-derived provider economics available"
+}));
 
 let lastSuccessfulSnapshot: StakingPlansSnapshot | null = null;
 let lastServedSnapshot: StakingPlansSnapshot | null = null;
+let lastProviderPlans = new Map<string, PublicPlan>();
+let lastAllocationValue: string | null = null;
+let lastMinimumStake: number | null = null;
 type GraphQLResponse<T> = { data?: T; errors?: Array<{ message: string }> };
 
 export function extractLatestBlockTimestamp(source: IgniterLatestBlock): string | null {
@@ -99,6 +129,18 @@ export function getStakingDiagnostics(): {
   stale: boolean;
   source: StakingPlansSnapshot["source"] | null;
   staticFallbackActive: boolean;
+  allocationStatus: "live" | "stale" | "unavailable" | null;
+  minimumStakeStatus: "live" | "stale" | "unavailable" | null;
+  providers: Array<{
+    id: string;
+    provider: string;
+    domain: string | null;
+    status: RewardStatus;
+    valueSource: PlanValueSource;
+    sourceUpdatedAt: string | null;
+    fetchedAt: string;
+    reason: string | null;
+  }>;
 } {
   const snapshot = lastServedSnapshot;
   return {
@@ -106,7 +148,19 @@ export function getStakingDiagnostics(): {
     sourceUpdatedAt: snapshot?.sourceUpdatedAt ?? null,
     stale: snapshot?.stale ?? true,
     source: snapshot?.source ?? null,
-    staticFallbackActive: snapshot?.source === "last-known-good" && snapshot.sourceUpdatedAt == null
+    staticFallbackActive: snapshot?.plans.every((plan) => plan.valueSource === "static-cold-start") ?? true,
+    allocationStatus: snapshot?.allocationStatus ?? null,
+    minimumStakeStatus: snapshot?.minimumStakeStatus ?? null,
+    providers: (snapshot?.plans ?? []).map((plan) => ({
+      id: plan.id,
+      provider: plan.provider,
+      domain: getPlanDomain(plan.id),
+      status: plan.rewardStatus,
+      valueSource: plan.valueSource,
+      sourceUpdatedAt: plan.sourceUpdatedAt,
+      fetchedAt: plan.fetchedAt,
+      reason: plan.diagnosticReason ?? null
+    }))
   };
 }
 
@@ -159,7 +213,6 @@ export function buildLivePlans(
   metadata = PLAN_METADATA
 ): StakingPlansSnapshot {
   const sourceUpdatedAt = normalizeSourceTimestamp(source.sourceUpdatedAt);
-  if (!isSourceFresh(sourceUpdatedAt, now.getTime(), REFRESH_INTERVAL_MS)) throw new Error("Pocket GraphQL reward source is stale");
   const allocationValue = source.allocation?.value;
   if (!allocationValue) throw new Error("Pocket GraphQL supplier allocation is unavailable");
   let supplierAllocation: number;
@@ -172,7 +225,7 @@ export function buildLivePlans(
     throw new Error("Pocket GraphQL supplier allocation is invalid");
   }
 
-  const plans = metadata.map((planMetadata) => {
+  const plans = metadata.map((planMetadata): PublicPlan | null => {
     const services = rewardsByDomain.get(planMetadata.domain);
     if (!services || services.length === 0) return null;
     let grossSevenDayPerSupplierUpokt = 0;
@@ -188,56 +241,161 @@ export function buildLivePlans(
     const clientShare = getUniformClientShare(planMetadata);
     if (clientShare == null) return null;
     const economics = derivePlanEconomics(grossSevenDayPerSupplierUpokt, clientShare, minimumStake);
-    return { ...planMetadata, clientShare, displayedYield: economics.netDailyPokt, apr: economics.apr };
-  }).filter((plan): plan is ProviderPlanMetadata & { displayedYield: number; apr: number } => plan !== null)
+    return {
+      ...planMetadata,
+      clientShare,
+      displayedYield: economics.netDailyPokt,
+      apr: economics.apr,
+      rewardStatus: isSourceFresh(sourceUpdatedAt, now.getTime(), REFRESH_INTERVAL_MS) ? "live" : "stale",
+      valueSource: isSourceFresh(sourceUpdatedAt, now.getTime(), REFRESH_INTERVAL_MS) ? "live-derived" : "stale-derived",
+      sourceUpdatedAt,
+      fetchedAt: now.toISOString()
+    };
+  }).filter((plan): plan is PublicPlan => plan !== null)
     .filter((plan) => plan.apr > MINIMUM_DISPLAY_APR)
-    .sort((a, b) => b.apr - a.apr || a.provider.localeCompare(b.provider))
-    .map(({ domain: _domain, ...plan }) => plan);
+    .sort((a, b) => b.apr - a.apr || a.provider.localeCompare(b.provider));
   if (plans.length === 0) throw new Error("Pocket GraphQL returned no configured public provider plans");
 
-  return { plans, fetchedAt: now.toISOString(), sourceUpdatedAt, minimumSupplierStake: minimumStake, stale: false, source: "igniter-indexer" };
+  const sourceFresh = isSourceFresh(sourceUpdatedAt, now.getTime(), REFRESH_INTERVAL_MS);
+  return { plans, fetchedAt: now.toISOString(), sourceUpdatedAt, minimumSupplierStake: minimumStake, stale: !sourceFresh, source: "igniter-indexer", allocationStatus: sourceFresh ? "live" : "stale", minimumStakeStatus: sourceFresh ? "live" : "stale" };
+}
+
+function parseSupplierAllocation(value: string | null | undefined): number | null {
+  if (!value) return null;
+  try {
+    const allocation = toNumber((JSON.parse(value) as { supplier?: unknown }).supplier);
+    return allocation != null && allocation >= 0 && allocation <= 1 ? allocation : null;
+  } catch {
+    return null;
+  }
+}
+
+function unavailablePlan(metadata: ProviderPlanMetadata, now: Date, sourceUpdatedAt: string | null, reason: string): PublicPlan {
+  return {
+    ...metadata,
+    apr: 0,
+    displayedYield: 0,
+    rewardStatus: "unavailable",
+    valueSource: "static-cold-start",
+    sourceUpdatedAt,
+    fetchedAt: now.toISOString(),
+    diagnosticReason: reason
+  };
+}
+
+function deriveProviderPlan(
+  metadata: ProviderPlanMetadata,
+  services: IgniterRewardService[],
+  supplierAllocation: number,
+  minimumStake: number,
+  now: Date,
+  sourceUpdatedAt: string,
+  sourceFresh: boolean
+): PublicPlan | null {
+  let grossSevenDayPerSupplierUpokt = 0;
+  for (const service of services) {
+    const gross = toNumber(service.gross_rewards);
+    const suppliers = toNumber(service.staked_suppliers);
+    if (gross == null || suppliers == null || suppliers <= 0) return null;
+    grossSevenDayPerSupplierUpokt += Math.floor(gross * supplierAllocation) / suppliers;
+  }
+  const clientShare = getUniformClientShare(metadata);
+  if (clientShare == null) return null;
+  const economics = derivePlanEconomics(grossSevenDayPerSupplierUpokt, clientShare, minimumStake);
+  return {
+    ...metadata,
+    clientShare,
+    displayedYield: economics.netDailyPokt,
+    apr: economics.apr,
+    rewardStatus: sourceFresh ? "live" : "stale",
+    valueSource: sourceFresh ? "live-derived" : "stale-derived",
+    sourceUpdatedAt,
+    fetchedAt: now.toISOString()
+  };
+}
+
+function buildPartialPlans(
+  sourceUpdatedAt: string | null,
+  allocationValue: string | null,
+  minimumStake: number | null,
+  allocationStatus: "live" | "stale" | "unavailable",
+  minimumStakeStatus: "live" | "stale" | "unavailable",
+  rewardEntries: Map<string, { services: IgniterRewardService[]; error?: string }>,
+  now: Date
+): StakingPlansSnapshot {
+  const sourceFresh = isSourceFresh(sourceUpdatedAt, now.getTime(), REFRESH_INTERVAL_MS);
+  const supplierAllocation = parseSupplierAllocation(allocationValue);
+  const plans = PLAN_METADATA.map((metadata): PublicPlan => {
+    const entry = rewardEntries.get(metadata.domain);
+    const reason = entry?.error ?? (!entry || entry.services.length === 0 ? "provider reward query returned no usable services" : null);
+    const livePlan = supplierAllocation != null && minimumStake != null && Boolean(sourceUpdatedAt) && !reason
+      ? deriveProviderPlan(metadata, entry?.services ?? [], supplierAllocation, minimumStake, now, sourceUpdatedAt as string, sourceFresh)
+      : null;
+    if (livePlan) {
+      lastProviderPlans.set(metadata.id, livePlan);
+      return livePlan;
+    }
+    const previous = lastProviderPlans.get(metadata.id);
+    if (previous) {
+      return {
+        ...previous,
+        rewardStatus: "stale" as const,
+        valueSource: "provider-lkg" as const,
+        fetchedAt: now.toISOString(),
+        diagnosticReason: reason ?? (sourceUpdatedAt ? "upstream source is stale" : "latest source timestamp unavailable")
+      };
+    }
+    return unavailablePlan(metadata, now, sourceUpdatedAt, reason ?? "global staking input unavailable");
+  }).filter((plan): plan is PublicPlan => plan != null)
+    .sort((a, b) => b.apr - a.apr || a.provider.localeCompare(b.provider));
+
+  const liveDerivedCount = plans.filter((plan) => plan.valueSource === "live-derived").length;
+  const anyDerivedCount = plans.filter((plan) => plan.valueSource !== "static-cold-start").length;
+  const stale = plans.some((plan) => plan.rewardStatus !== "live") || allocationStatus !== "live" || minimumStakeStatus !== "live" || !sourceFresh;
+  return {
+    plans,
+    fetchedAt: now.toISOString(),
+    sourceUpdatedAt,
+    minimumSupplierStake: minimumStake ?? lastMinimumStake ?? DEFAULT_POKT_PER_SUPPLIER,
+    stale,
+    source: liveDerivedCount > 0 || anyDerivedCount > 0 ? "igniter-indexer" : "last-known-good",
+    allocationStatus,
+    minimumStakeStatus
+  };
 }
 
 async function fetchLivePlans(): Promise<StakingPlansSnapshot> {
   const now = new Date();
-  let sourceUpdatedAt: string | null;
-  let allocation: IgniterAllocation["allocation"];
-  try {
-    const [latestBlock, allocationResponse] = await Promise.all([
-      fetchGraphQL<IgniterLatestBlock>(IGNITER_LATEST_BLOCK_QUERY),
-      fetchGraphQL<IgniterAllocation>(IGNITER_ALLOCATION_QUERY)
-    ]);
-    sourceUpdatedAt = extractLatestBlockTimestamp(latestBlock);
-    allocation = allocationResponse.allocation;
-  } catch (error) {
-    throw new StakingRefreshError("source", error);
-  }
-  if (!sourceUpdatedAt) throw new Error("Pocket GraphQL latest block timestamp is unavailable");
-  const latestBlock = new Date(sourceUpdatedAt);
-  const endTs = new Date(Date.UTC(latestBlock.getUTCFullYear(), latestBlock.getUTCMonth(), latestBlock.getUTCDate(), 23, 59, 59, 999));
-  const startTs = new Date(Date.UTC(latestBlock.getUTCFullYear(), latestBlock.getUTCMonth(), latestBlock.getUTCDate() - 6, 0, 0, 0, 0));
-  let rewardEntries: Array<readonly [string, IgniterRewardService[]]>;
-  try {
-    rewardEntries = await Promise.all(PLAN_METADATA.map(async (metadata) => {
-      const data = await fetchGraphQL<{ rewards?: IgniterRewardPayload }>(IGNITER_REWARDS_QUERY, {
-        domains: [metadata.domain], startTs: startTs.toISOString(), endTs: endTs.toISOString()
-      });
-      return [metadata.domain, data.rewards?.services ?? []] as const;
-    }));
-  } catch (error) {
-    throw new StakingRefreshError("rewards", error);
-  }
-  let minimumStake: number;
-  try {
-    minimumStake = await fetchMinimumSupplierStake();
-  } catch (error) {
-    throw new StakingRefreshError("minimum-stake", error);
-  }
-  try {
-    return buildLivePlans({ sourceUpdatedAt, allocation }, new Map(rewardEntries), minimumStake, now);
-  } catch (error) {
-    throw new StakingRefreshError("derive", error);
-  }
+  const [latestResult, allocationResult, minimumStakeResult] = await Promise.allSettled([
+    fetchGraphQL<IgniterLatestBlock>(IGNITER_LATEST_BLOCK_QUERY),
+    fetchGraphQL<IgniterAllocation>(IGNITER_ALLOCATION_QUERY),
+    fetchMinimumSupplierStake()
+  ]);
+  const latestBlock = latestResult.status === "fulfilled" ? extractLatestBlockTimestamp(latestResult.value) : null;
+  const sourceUpdatedAt = latestBlock ?? lastSuccessfulSnapshot?.sourceUpdatedAt ?? null;
+  const allocationValue = allocationResult.status === "fulfilled" ? allocationResult.value.allocation?.value ?? null : lastAllocationValue;
+  const minimumStake = minimumStakeResult.status === "fulfilled" ? minimumStakeResult.value : lastMinimumStake;
+  const allocationStatus = allocationResult.status === "fulfilled" ? "live" : lastAllocationValue ? "stale" : "unavailable";
+  const minimumStakeStatus = minimumStakeResult.status === "fulfilled" ? "live" : lastMinimumStake != null ? "stale" : "unavailable";
+  if (allocationResult.status === "fulfilled" && allocationValue) lastAllocationValue = allocationValue;
+  if (minimumStakeResult.status === "fulfilled") lastMinimumStake = minimumStakeResult.value;
+
+  const anchor = sourceUpdatedAt ? new Date(sourceUpdatedAt) : now;
+  const endTs = new Date(Date.UTC(anchor.getUTCFullYear(), anchor.getUTCMonth(), anchor.getUTCDate(), 23, 59, 59, 999));
+  const startTs = new Date(Date.UTC(anchor.getUTCFullYear(), anchor.getUTCMonth(), anchor.getUTCDate() - 6, 0, 0, 0, 0));
+  const rewardResults: Array<readonly [string, { services: IgniterRewardService[]; error?: string }]> = [];
+  const settledRewards = await Promise.allSettled(PLAN_METADATA.map((metadata) => fetchGraphQL<{ rewards?: IgniterRewardPayload }>(IGNITER_REWARDS_QUERY, {
+    domains: [metadata.domain], startTs: startTs.toISOString(), endTs: endTs.toISOString()
+  })));
+  settledRewards.forEach((result, index) => {
+    const metadata = PLAN_METADATA[index];
+    if (result.status === "fulfilled") {
+      rewardResults.push([metadata.domain, { services: result.value.rewards?.services ?? [] }]);
+    } else {
+      rewardResults.push([metadata.domain, { services: [], error: result.reason instanceof Error ? result.reason.message : String(result.reason) }]);
+    }
+  });
+  return buildPartialPlans(sourceUpdatedAt, allocationValue, minimumStake, allocationStatus, minimumStakeStatus, new Map(rewardResults), now);
 }
 
 async function loadStakingPlans(fetcher: () => Promise<StakingPlansSnapshot> = fetchLivePlans, now = Date.now()): Promise<StakingPlansSnapshot> {
@@ -259,10 +417,32 @@ async function loadStakingPlans(fetcher: () => Promise<StakingPlansSnapshot> = f
       fetchedAt: lastSuccessfulSnapshot?.fetchedAt ?? null
     });
     if (lastSuccessfulSnapshot) {
-      lastServedSnapshot = { ...lastSuccessfulSnapshot, stale: true, source: "last-known-good" };
+      lastServedSnapshot = {
+        ...lastSuccessfulSnapshot,
+        plans: lastSuccessfulSnapshot.plans.map((plan) => plan.valueSource === "static-cold-start" ? plan : {
+          ...plan,
+          rewardStatus: "stale" as const,
+          valueSource: "provider-lkg" as const,
+          fetchedAt: new Date().toISOString(),
+          diagnosticReason: "live refresh failed; serving provider last-known-good"
+        }),
+        stale: true,
+        source: "last-known-good",
+        allocationStatus: lastSuccessfulSnapshot.allocationStatus === "live" ? "stale" : lastSuccessfulSnapshot.allocationStatus,
+        minimumStakeStatus: lastSuccessfulSnapshot.minimumStakeStatus === "live" ? "stale" : lastSuccessfulSnapshot.minimumStakeStatus
+      };
       return lastServedSnapshot;
     }
-    lastServedSnapshot = { plans: LAST_KNOWN_GOOD, fetchedAt: new Date().toISOString(), sourceUpdatedAt: null, minimumSupplierStake: DEFAULT_POKT_PER_SUPPLIER, stale: true, source: "last-known-good" };
+    lastServedSnapshot = {
+      plans: LAST_KNOWN_GOOD,
+      fetchedAt: new Date().toISOString(),
+      sourceUpdatedAt: null,
+      minimumSupplierStake: DEFAULT_POKT_PER_SUPPLIER,
+      stale: true,
+      source: "last-known-good",
+      allocationStatus: "unavailable",
+      minimumStakeStatus: "unavailable"
+    };
     return lastServedSnapshot;
   }
 }
@@ -272,5 +452,11 @@ export const __testing = {
   fetchLivePlans,
   loadStakingPlans,
   buildLivePlans,
-  resetLastSuccessfulSnapshot: () => { lastSuccessfulSnapshot = null; lastServedSnapshot = null; }
+  resetLastSuccessfulSnapshot: () => {
+    lastSuccessfulSnapshot = null;
+    lastServedSnapshot = null;
+    lastProviderPlans = new Map();
+    lastAllocationValue = null;
+    lastMinimumStake = null;
+  }
 };

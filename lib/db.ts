@@ -493,6 +493,8 @@ const upsertServiceStatement = db.prepare(
   `
 );
 
+const selectIndexedServiceIdsStatement = db.prepare("SELECT service_id FROM service_dim ORDER BY service_id ASC");
+
 const upsertSupplierDomainStatement = db.prepare(
   `
     INSERT INTO supplier_domain_dim (supplier_hash, domain_hash, has_endpoint, updated_at)
@@ -1284,6 +1286,10 @@ export function saveIndexedServices(services: IndexedService[]): void {
     }
   });
   transaction(services);
+}
+
+export function getIndexedServiceIds(): string[] {
+  return (selectIndexedServiceIdsStatement.all() as Array<{ service_id: string }>).map((row) => row.service_id);
 }
 
 export function saveIndexedSupplierDomains(domains: IndexedSupplierDomain[]): void {

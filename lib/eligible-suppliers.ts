@@ -1,6 +1,10 @@
+import { ELIGIBLE_SUPPLIER_SNAPSHOT_SCHEMA_VERSION } from "@/lib/cache-contract";
+
 export const ELIGIBLE_SUPPLIER_MAX_AGE_MS = 6 * 60 * 60 * 1000;
 
 export type EligibleSupplierSnapshot = {
+  schemaVersion: typeof ELIGIBLE_SUPPLIER_SNAPSHOT_SCHEMA_VERSION;
+  complete: true;
   counts: Record<string, number>;
   fetchedAt: string;
 };
@@ -11,6 +15,21 @@ export type EligibleSupplierPage = {
     services?: Array<{ service_id?: string }>;
   }>;
 };
+
+export function parseEligibleSupplierSnapshot(value: unknown): EligibleSupplierSnapshot | null {
+  if (!value || typeof value !== "object") return null;
+  const candidate = value as Partial<EligibleSupplierSnapshot>;
+  if (candidate.schemaVersion !== ELIGIBLE_SUPPLIER_SNAPSHOT_SCHEMA_VERSION || candidate.complete !== true) return null;
+  if (!candidate.counts || typeof candidate.counts !== "object" || typeof candidate.fetchedAt !== "string") return null;
+  const counts = candidate.counts as Record<string, unknown>;
+  if (Object.values(counts).some((count) => typeof count !== "number" || !Number.isFinite(count) || count < 0)) return null;
+  return {
+    schemaVersion: ELIGIBLE_SUPPLIER_SNAPSHOT_SCHEMA_VERSION,
+    complete: true,
+    counts: counts as Record<string, number>,
+    fetchedAt: candidate.fetchedAt
+  };
+}
 
 export function isEligibleSupplierSnapshotComplete(
   snapshot: EligibleSupplierSnapshot,

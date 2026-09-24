@@ -150,6 +150,9 @@ export default function StakingDashboard({ plans: publicPlans, fetchedAt, source
                     <b>{plan.provider}</b>
                   </a>
                 ) : <b>{plan.provider}</b>}
+                <small className={`staking-feed-status ${plan.rewardStatus === "live" ? "" : "stale"}`}>
+                  {plan.rewardStatus === "live" ? "Live" : plan.rewardStatus === "stale" ? "Stale" : "Unavailable"}
+                </small>
               </span>
               <span role="cell">{plan.displayedYield.toFixed(2)} <small>POKT/supplier</small></span>
               <span className="staking-client-share" role="cell"><span>{plan.clientShare.toFixed(1)}%</span><small>Configured · verified {formatTermsVerifiedAt(plan.termsVerifiedAt)}</small></span>

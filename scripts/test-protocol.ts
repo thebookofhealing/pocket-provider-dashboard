@@ -2,14 +2,17 @@ import assert from "node:assert/strict";
 
 import {
   buildProviderServiceOpportunity,
+  getProjectedRevenueUpokt,
   getSelectionProbability,
   SESSION_SUPPLIER_SLOTS
 } from "@/lib/opportunities";
 import { derivePlanEconomics, isSourceFresh, normalizeSourceTimestamp } from "@/lib/staking-economics";
-import { isEligibleSupplierSnapshotComplete, isEligibleSupplierSnapshotFresh, isEligibleSupplierSnapshotReusable, selectEligibleSupplierSnapshot } from "@/lib/eligible-suppliers";
+import { isEligibleSupplierSnapshotComplete, isEligibleSupplierSnapshotFresh, isEligibleSupplierSnapshotReusable, parseEligibleSupplierSnapshot, selectEligibleSupplierSnapshot } from "@/lib/eligible-suppliers";
 import { __testing as stakingTesting, extractLatestBlockTimestamp, IGNITER_LATEST_BLOCK_QUERY, IGNITER_REWARDS_QUERY } from "@/lib/staking-plans";
 import { aggregateEligibleSupplierCounts } from "@/lib/eligible-suppliers";
 import { getDeployedSha } from "@/lib/deployment";
+import { resolveEligibleSupplierCounts } from "@/lib/eligible-supplier-source";
+import { ELIGIBLE_SUPPLIER_SNAPSHOT_SCHEMA_VERSION, hasCompleteEligibleSupplierCounts } from "@/lib/cache-contract";
 
 assert.equal(getSelectionProbability(40, 1), 100, "all eligible suppliers fit within session slots");
 assert.equal(getSelectionProbability(100, 0), 0, "no entering suppliers has no selection probability");
@@ -66,6 +69,21 @@ const zeroEligible = buildProviderServiceOpportunity({
 assert.equal(zeroEligible.eligibleSupplierCountAvailable, true, "zero eligible count remains an available metric");
 assert.ok(Number.isFinite(zeroEligible.selectionProbability), "zero eligible count produces finite calculator metrics");
 
+const simulatorServices = [
+  { serviceId: "bnb", serviceName: "BNB", supplierCount: 20, eligibleSupplierCount: 20, providerCount: 2, relays: 10, revenueUpokt: "100000000" },
+  { serviceId: "eth", serviceName: "Ethereum", supplierCount: 5, eligibleSupplierCount: 5, providerCount: 1, relays: 8, revenueUpokt: "50000000" }
+];
+const bnbOpportunity = buildProviderServiceOpportunity(simulatorServices[0], 15, { sessionSlots: 50 });
+const ethOpportunity = buildProviderServiceOpportunity(simulatorServices[1], 15, { sessionSlots: 50 });
+assert.equal(bnbOpportunity.equalShareRevenueEstimateUpokt, getProjectedRevenueUpokt(100000000n, 20, 15), "each selected service uses the full supplier count");
+assert.equal(ethOpportunity.equalShareRevenueEstimateUpokt, getProjectedRevenueUpokt(50000000n, 5, 15), "each selected service uses the full supplier count independently");
+assert.ok(bnbOpportunity.equalShareRevenueEstimateUpokt + ethOpportunity.equalShareRevenueEstimateUpokt > bnbOpportunity.equalShareRevenueEstimateUpokt, "adding a positive-reward service increases projected rewards");
+assert.equal(buildProviderServiceOpportunity(simulatorServices[0], 15).selectionProbability, bnbOpportunity.selectionProbability, "adding another service does not change an existing service's odds");
+assert.ok(getSelectionProbability(10, 15, 50) >= getSelectionProbability(20, 15, 50), "lower eligible E cannot lower fixed-M selection odds");
+const meanIndependentOdds = (bnbOpportunity.selectionProbability + ethOpportunity.selectionProbability) / 2;
+assert.equal(meanIndependentOdds, [bnbOpportunity, ethOpportunity].reduce((sum, opportunity) => sum + opportunity.selectionProbability, 0) / 2, "summary odds are the mean of independent service odds");
+assert.equal(ethOpportunity.equalShareRevenueEstimateUpokt, getProjectedRevenueUpokt(50000000n, 5, 15), "removing BNB removes only BNB's contribution");
+
 const economics = derivePlanEconomics(7_000_000, 50, 59_500);
 assert.equal(economics.grossDailyPokt, 1);
 assert.equal(economics.netDailyPokt, 0.5);
@@ -77,8 +95,9 @@ assert.equal(isSourceFresh("2026-09-22T11:44:59.000Z", fresh), false);
 assert.equal(isSourceFresh(null, fresh), false);
 assert.equal(normalizeSourceTimestamp("1790096400000"), "2026-09-22T17:00:00.000Z");
 
-const eligibleSnapshot = { counts: { base: 12 }, fetchedAt: "2026-09-22T06:00:00.000Z" };
-const completeEligibleSnapshot = { counts: { base: 12, eth: 0 }, fetchedAt: "2026-09-22T06:00:00.000Z" };
+const eligibleSnapshot = { schemaVersion: ELIGIBLE_SUPPLIER_SNAPSHOT_SCHEMA_VERSION, complete: true as const, counts: { base: 12 }, fetchedAt: "2026-09-22T06:00:00.000Z" };
+const completeEligibleSnapshot = { schemaVersion: ELIGIBLE_SUPPLIER_SNAPSHOT_SCHEMA_VERSION, complete: true as const, counts: { base: 12, eth: 0 }, fetchedAt: "2026-09-22T06:00:00.000Z" };
+assert.equal(parseEligibleSupplierSnapshot({ counts: { base: 12 }, fetchedAt: "2026-09-22T06:00:00.000Z" }), null, "legacy eligible snapshot payload is rejected");
 assert.equal(isEligibleSupplierSnapshotComplete(eligibleSnapshot, new Set(["base", "eth"])), false, "legacy snapshot without zero-count service is incomplete");
 assert.equal(isEligibleSupplierSnapshotComplete(completeEligibleSnapshot, new Set(["base", "eth"])), true, "complete snapshot is reusable when all services are present");
 assert.equal(isEligibleSupplierSnapshotComplete(completeEligibleSnapshot, new Set(["base", "eth", "new-service"])), false, "newly registered service invalidates an older snapshot");
@@ -89,7 +108,9 @@ assert.equal(isEligibleSupplierSnapshotFresh(eligibleSnapshot, fresh), true);
 assert.equal(isEligibleSupplierSnapshotFresh(eligibleSnapshot, fresh + 6 * 60 * 60 * 1000 + 1), false);
 assert.deepEqual(selectEligibleSupplierSnapshot(eligibleSnapshot, null, fresh + 7 * 60 * 60 * 1000), { snapshot: eligibleSnapshot, stale: true });
 assert.deepEqual(selectEligibleSupplierSnapshot(eligibleSnapshot, null, fresh, new Set(["base", "eth"])), { snapshot: eligibleSnapshot, stale: true }, "failed refresh after incomplete cache remains stale/fail-closed");
-assert.deepEqual(selectEligibleSupplierSnapshot(eligibleSnapshot, { counts: { base: 13 }, fetchedAt: "2026-09-22T12:00:00.000Z" }, fresh), { snapshot: { counts: { base: 13 }, fetchedAt: "2026-09-22T12:00:00.000Z" }, stale: false });
+assert.deepEqual(selectEligibleSupplierSnapshot(eligibleSnapshot, { ...completeEligibleSnapshot, counts: { base: 13, eth: 0 }, fetchedAt: "2026-09-22T12:00:00.000Z" }, fresh), { snapshot: { ...completeEligibleSnapshot, counts: { base: 13, eth: 0 }, fetchedAt: "2026-09-22T12:00:00.000Z" }, stale: false });
+assert.equal(hasCompleteEligibleSupplierCounts([{ eligibleSupplierCount: 0, eligibleSupplierCountFetchedAt: "2026-09-22T12:00:00.000Z", eligibleSupplierCountStale: false }]), true, "zero counts satisfy the shared readiness predicate");
+assert.equal(hasCompleteEligibleSupplierCounts([{ eligibleSupplierCount: 1, eligibleSupplierCountFetchedAt: "2026-09-22T12:00:00.000Z", eligibleSupplierCountStale: true }]), false, "stale counts fail the shared readiness predicate");
 
 const snapshotSource = {
   sourceUpdatedAt: "2026-09-22T11:55:00.000Z",
@@ -131,13 +152,15 @@ const changedShareSnapshot = stakingTesting.buildLivePlans(
 );
 assert.ok(Math.abs((changedShareSnapshot.plans[0]?.displayedYield ?? 0) - (25 + 5 / 7)) < 1e-9, "a refreshed client-share input changes the derived yield");
 
-assert.throws(() => stakingTesting.buildLivePlans(
+const staleSourceSnapshot = stakingTesting.buildLivePlans(
   { ...snapshotSource, sourceUpdatedAt: "2026-09-22T11:00:00.000Z" },
   rewardFixture,
   59_500,
   new Date("2026-09-22T12:00:00.000Z"),
   fixtureMetadata
-), /stale/, "stale source cannot be marked live");
+);
+assert.equal(staleSourceSnapshot.stale, true, "stale source is surfaced as stale");
+assert.equal(staleSourceSnapshot.plans[0]?.rewardStatus, "stale", "stale-derived provider rewards are explicitly marked stale");
 
 const termsDateChanged = stakingTesting.buildLivePlans(
   snapshotSource,
@@ -160,6 +183,42 @@ assert.throws(() => stakingTesting.buildLivePlans(
 (async () => {
   stakingTesting.resetLastSuccessfulSnapshot();
   const cacheStart = Date.parse("2026-09-22T12:00:00.000Z");
+  const sourceKnownServices = new Set(["bnb", "eth"]);
+  const freshSourceSnapshot = { schemaVersion: ELIGIBLE_SUPPLIER_SNAPSHOT_SCHEMA_VERSION, complete: true as const, counts: { bnb: 20, eth: 5 }, fetchedAt: "2026-09-22T11:30:00.000Z", stale: false as const, source: "rest" as const };
+  let restSourceCalls = 0;
+  const preferredLocal = await resolveEligibleSupplierCounts(sourceKnownServices, freshSourceSnapshot, null, {
+    rest: async () => { restSourceCalls += 1; throw new Error("rest should not be called"); },
+    graphql: async () => { throw new Error("graphql should not be called"); }
+  }, cacheStart);
+  assert.equal(preferredLocal.source, "rest", "fresh local eligible snapshot is preferred");
+  assert.equal(restSourceCalls, 0, "fresh local eligible snapshot avoids upstream refresh");
+  const staleLocal = { ...freshSourceSnapshot, fetchedAt: "2026-09-22T00:00:00.000Z" };
+  const graphqlFallback = await resolveEligibleSupplierCounts(sourceKnownServices, staleLocal, null, {
+    rest: async () => { throw new Error("REST unavailable"); },
+    graphql: async () => ({ ...freshSourceSnapshot, source: "poktscan-graphql" as const, fetchedAt: "2026-09-22T12:00:00.000Z" })
+  }, cacheStart);
+  assert.equal(graphqlFallback.source, "poktscan-graphql", "stale local counts fall back to data.pocket.network GraphQL");
+  // This models the indexer's materializer after the REST source is down: the
+  // shared resolver must publish a complete fresh snapshot and the dashboard
+  // rows must receive the winning GraphQL source rather than an indexer label.
+  const materializedRows = Array.from(sourceKnownServices, (serviceId) => ({
+    serviceId,
+    eligibleSupplierCount: graphqlFallback.counts[serviceId],
+    eligibleSupplierCountStale: graphqlFallback.stale,
+    eligibleSupplierSnapshotSource: graphqlFallback.source
+  }));
+  assert.equal(graphqlFallback.stale, false, "GraphQL fallback is fresh");
+  assert.deepEqual(materializedRows.map((row) => row.eligibleSupplierCount), [20, 5], "GraphQL fallback materializes every known service");
+  assert.ok(materializedRows.every((row) => row.eligibleSupplierSnapshotSource === "poktscan-graphql" && row.eligibleSupplierCountStale === false), "materialized rows retain GraphQL provenance and freshness");
+  const staleLkg = await resolveEligibleSupplierCounts(sourceKnownServices, staleLocal, null, {
+    rest: async () => { throw new Error("REST unavailable"); },
+    graphql: async () => { throw new Error("GraphQL unavailable"); }
+  }, cacheStart);
+  assert.equal(staleLkg.stale, true, "failed fallback retains only a stale LKG snapshot");
+  await assert.rejects(() => resolveEligibleSupplierCounts(new Set(["bnb", "eth", "new"]), staleLocal, null, {
+    rest: async () => { throw new Error("REST unavailable"); },
+    graphql: async () => { throw new Error("GraphQL unavailable"); }
+  }, cacheStart), /REST unavailable/, "incomplete local and failed upstream sources fail closed");
   const firstSnapshot = { ...liveSnapshot, fetchedAt: "2026-09-22T12:00:00.000Z", sourceUpdatedAt: "2026-09-22T11:50:00.000Z" };
   assert.equal((await stakingTesting.loadStakingPlans(async () => firstSnapshot, cacheStart)).source, "igniter-indexer");
   let refreshAttempted = false;

@@ -56,6 +56,12 @@ export type ServiceStats = {
 };
 
 export type DashboardData = {
+  dashboardSchemaVersion?: number;
+  eligibleSupplierSnapshotSchemaVersion?: number;
+  eligibleSupplierSnapshotComplete?: boolean;
+  eligibleSupplierSnapshotFetchedAt?: string;
+  eligibleSupplierSnapshotStale?: boolean;
+  eligibleSupplierSnapshotSource?: "indexer" | "rest" | "poktscan-graphql" | "persisted-lkg";
   window: TimeWindow;
   generatedAt: string;
   dataSource: "poktscan" | "rpc";

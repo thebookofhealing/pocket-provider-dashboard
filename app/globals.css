@@ -2562,6 +2562,10 @@ code {
 .staking-tooltip a { color: var(--accent); font-weight: 800; text-decoration: underline; text-underline-offset: 2px; }
 .staking-tooltip-wrap:hover .staking-tooltip,
 .staking-tooltip-wrap:focus-within .staking-tooltip { opacity: 1; visibility: visible; transform: translate(-50%, 0); }
+
+/* Keep the minimum-stake tooltip readable over the card value. */
+.staking-tooltip { background: #171432; backdrop-filter: none; border-color: rgba(255, 255, 255, .18); }
+.staking-tooltip::before { background: #171432; border-color: rgba(255, 255, 255, .18); }
 .staking-scenario-tabs { position: relative; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; }
 .staking-scenario-tabs button {
   display: grid;
@@ -2963,5 +2967,802 @@ code {
 
   .explorer-page-size {
     margin-left: auto;
+  }
+}
+
+/* ==========================================================================
+   Kleomedes visual refresh mockup
+   Styling-only layer derived from the Kleomedes corporate site design system.
+   No product copy, data semantics, or application behavior is changed here.
+   ========================================================================== */
+
+:root {
+  --bg-dark: #120f28;
+  --bg: #15122f;
+  --bg-mid: #191638;
+  --bg-light: #211c45;
+
+  --blue-primary: #2575fc;
+  --cyan-accent: #25b1fc;
+  --cyan-light: #4cc4ff;
+  --blue-dark: #0d1e80;
+
+  --kleomedes-violet: #5711cb;
+  --kleomedes-violet-deep: #260757;
+  --kleomedes-indigo: #576eee;
+  --kleomedes-surface: rgba(255, 255, 255, 0.025);
+  --kleomedes-surface-strong: rgba(255, 255, 255, 0.045);
+
+  --bg-deep: #0f0c22;
+  --panel: rgba(24, 20, 53, 0.86);
+  --panel-strong: rgba(34, 29, 70, 0.78);
+  --panel-soft: rgba(255, 255, 255, 0.032);
+
+  --border: rgba(255, 255, 255, 0.085);
+  --border-strong: rgba(37, 177, 252, 0.32);
+
+  --text: #f8fafc;
+  --muted: #aeb8ca;
+  --accent: var(--cyan-accent);
+  --accent-strong: var(--action-blue, #2575fc);
+  --green: #52d6a6;
+  --orange: #f0bc61;
+  --vanilla: #f0bc61;
+  --red: #ff6f8c;
+
+  --shadow-sm: 0 8px 22px rgba(3, 2, 12, 0.2);
+  --shadow-md: 0 18px 54px rgba(3, 2, 12, 0.28);
+  --shadow-lg: 0 32px 90px rgba(3, 2, 12, 0.38);
+
+  --radius-sm: 6px;
+  --radius-md: 12px;
+  --radius-lg: 18px;
+}
+
+html {
+  background: var(--bg-dark);
+}
+
+body {
+  position: relative;
+  overflow-x: hidden;
+  color: var(--text);
+  background:
+    radial-gradient(circle at 76% 8%, rgba(37, 177, 252, 0.10), transparent 27rem),
+    radial-gradient(circle at 12% 28%, rgba(87, 17, 203, 0.11), transparent 31rem),
+    linear-gradient(180deg, #120f28 0%, #15122f 42%, #100d23 100%);
+}
+
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  opacity: 0.22;
+  background-image:
+    linear-gradient(rgba(255, 255, 255, 0.025) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.025) 1px, transparent 1px);
+  background-size: 56px 56px;
+  mask-image: linear-gradient(to bottom, rgba(0, 0, 0, 0.78), transparent 88%);
+}
+
+::selection {
+  color: #061221;
+  background: var(--cyan-light);
+}
+
+a {
+  color: var(--cyan-accent);
+}
+
+a:hover {
+  color: var(--cyan-light);
+}
+
+/* Shell + navigation ------------------------------------------------------- */
+
+/* The dashboard is Kleomedes-operated; remove the legacy Pocket wordmark
+   from the application shell while preserving the navigation/menu controls. */
+.site-brand {
+  display: none;
+}
+
+
+.site-header {
+  min-height: 72px;
+  padding-top: 14px;
+  padding-bottom: 14px;
+  border-bottom-color: rgba(255, 255, 255, 0.07);
+  background:
+    linear-gradient(180deg, rgba(18, 15, 40, 0.93), rgba(18, 15, 40, 0.80));
+  box-shadow: 0 16px 46px rgba(3, 2, 12, 0.20);
+  backdrop-filter: blur(24px) saturate(125%);
+}
+
+.site-header::after {
+  content: "";
+  position: absolute;
+  inset: auto 0 -1px;
+  height: 1px;
+  pointer-events: none;
+  background: linear-gradient(90deg, transparent, rgba(37, 177, 252, 0.32), transparent);
+}
+
+.site-brand {
+  gap: 12px;
+  letter-spacing: -0.025em;
+}
+
+.site-brand img {
+  padding: 6px;
+  border: 1px solid rgba(37, 177, 252, 0.18);
+  border-radius: 10px;
+  background: rgba(37, 177, 252, 0.055);
+  box-shadow: 0 0 34px rgba(37, 177, 252, 0.08);
+}
+
+.site-brand span {
+  color: #eef2ff;
+  font-size: 0.98rem;
+  font-weight: 700;
+}
+
+.site-nav {
+  gap: 4px;
+  padding: 4px;
+  border: 1px solid rgba(255, 255, 255, 0.055);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.018);
+}
+
+.site-nav-link {
+  min-height: 38px;
+  gap: 8px;
+  padding: 8px 13px;
+  border-radius: 9px;
+  color: #aab4c8;
+  font-size: 0.78rem;
+  font-weight: 650;
+  letter-spacing: 0.02em;
+}
+
+.site-nav-link svg {
+  width: 14px;
+  height: 14px;
+  opacity: 0.72;
+}
+
+.site-nav-link:hover {
+  color: #f8fafc;
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.site-nav-link.active {
+  color: #f8fafc;
+  border-color: rgba(37, 177, 252, 0.22);
+  background:
+    linear-gradient(180deg, rgba(37, 177, 252, 0.12), rgba(37, 177, 252, 0.045));
+  box-shadow: inset 0 -1px rgba(37, 177, 252, 0.12);
+}
+
+.site-nav-link.active svg {
+  color: var(--cyan-accent);
+  opacity: 1;
+}
+
+/* Global layout ----------------------------------------------------------- */
+
+.page {
+  width: min(1400px, calc(100vw - 64px));
+  padding-top: 54px;
+  gap: 56px;
+}
+
+.panel {
+  position: relative;
+  border-color: var(--border);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.024), transparent 34%),
+    rgba(24, 20, 53, 0.84);
+  box-shadow:
+    0 24px 72px rgba(3, 2, 12, 0.20),
+    inset 0 1px rgba(255, 255, 255, 0.025);
+  backdrop-filter: blur(16px);
+}
+
+.panel::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  background:
+    linear-gradient(125deg, rgba(37, 177, 252, 0.035), transparent 24%),
+    linear-gradient(310deg, rgba(87, 17, 203, 0.04), transparent 28%);
+}
+
+.panel:hover {
+  border-color: rgba(255, 255, 255, 0.13);
+}
+
+.panel-inset {
+  border-color: rgba(255, 255, 255, 0.065);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.018), transparent),
+    rgba(13, 11, 31, 0.68);
+  box-shadow: inset 0 1px rgba(255, 255, 255, 0.018);
+}
+
+.section,
+.hero-showcase,
+.hero-meta,
+.narrative-card,
+.provider-head {
+  border-radius: 20px;
+}
+
+.section {
+  padding: 34px 36px;
+}
+
+.section-title-row {
+  gap: 24px;
+}
+
+.section-title {
+  color: #f8fafc;
+  font-size: clamp(1.55rem, 2.2vw, 2.25rem);
+  font-weight: 650;
+  letter-spacing: -0.035em;
+}
+
+.section-subtitle,
+.muted,
+.footer-note,
+.narrative-card p,
+.opportunity-foot,
+.hero-highlight p {
+  color: var(--muted);
+}
+
+/* Editorial / hero treatment --------------------------------------------- */
+
+.eyebrow,
+.hero-highlight-label,
+.kpi-label,
+.provider-link-cue,
+.provider-inline-link {
+  color: rgba(76, 196, 255, 0.92);
+  letter-spacing: 0.18em;
+}
+
+.eyebrow {
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+.eyebrow::after {
+  content: "";
+  width: 52px;
+  height: 1px;
+  margin-left: 12px;
+  background: linear-gradient(90deg, rgba(37, 177, 252, 0.7), transparent);
+}
+
+.hero-copy-strong h1,
+.provider-head h1,
+.explorer-hero h1,
+.page-heading h1 {
+  color: #fff;
+  background: none;
+  -webkit-text-fill-color: currentColor;
+  font-weight: 650;
+  letter-spacing: -0.048em;
+}
+
+.dashboard-hero-showcase {
+  min-height: 420px;
+  border-color: rgba(255, 255, 255, 0.085);
+  background:
+    radial-gradient(circle at 82% 38%, rgba(37, 177, 252, 0.13), transparent 23rem),
+    radial-gradient(circle at 18% 92%, rgba(87, 17, 203, 0.12), transparent 25rem),
+    linear-gradient(110deg, rgba(18, 15, 40, 0.94), rgba(24, 20, 53, 0.82));
+}
+
+.dashboard-hero-showcase::before {
+  opacity: 0.72;
+  background-size: 56px 56px;
+}
+
+.dashboard-hero-showcase::after {
+  content: "KLEOMEDES / POCKET NETWORK";
+  position: absolute;
+  right: 28px;
+  bottom: 22px;
+  color: rgba(255, 255, 255, 0.14);
+  font-size: 0.58rem;
+  font-weight: 700;
+  letter-spacing: 0.34em;
+  writing-mode: vertical-rl;
+  transform: rotate(180deg);
+}
+
+.dashboard-hero-orb {
+  right: -70px;
+  top: -90px;
+  width: 360px;
+  height: 360px;
+  background: radial-gradient(circle, rgba(37, 177, 252, 0.15), rgba(87, 17, 203, 0.035) 44%, transparent 72%);
+  filter: blur(2px);
+}
+
+/* Metrics + cards --------------------------------------------------------- */
+
+.hero-highlight-grid,
+.kpi-grid,
+.calculator-kpis,
+.calculator-meta-grid,
+.provider-kpi-grid,
+.provider-history-summary,
+.timeseries-metrics,
+.network-trend-metrics {
+  gap: 14px;
+}
+
+.hero-highlight,
+.kpi,
+.calculator-kpi-card,
+.calculator-meta-card,
+.provider-timescale-card,
+.provider-history-stat,
+.network-pulse-grid > div,
+.staking-result-grid,
+.staking-opportunity {
+  border-color: rgba(255, 255, 255, 0.075);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.032), rgba(255, 255, 255, 0.012)),
+    rgba(15, 12, 34, 0.72);
+  box-shadow: none;
+}
+
+.hero-highlight:hover,
+.provider-timescale-card:hover {
+  transform: none;
+  border-color: rgba(37, 177, 252, 0.28);
+  box-shadow: 0 18px 48px rgba(3, 2, 12, 0.16);
+}
+
+.hero-highlight strong,
+.kpi strong,
+.provider-timescale-card strong,
+.provider-history-stat strong,
+.calculator-kpi-value {
+  color: #fff;
+  font-weight: 650;
+  letter-spacing: -0.035em;
+}
+
+.dashboard-primary-metrics .metric-glow-revenue::after,
+.dashboard-primary-metrics .metric-glow-demand::after {
+  opacity: 0.42;
+}
+
+.network-pulse-card {
+  border-color: rgba(255, 255, 255, 0.075);
+  background:
+    radial-gradient(circle at 92% 8%, rgba(37, 177, 252, 0.065), transparent 15rem),
+    rgba(12, 10, 29, 0.56);
+}
+
+/* Themed sections: replace loud left bars with fine signal accents. */
+
+.section.themed {
+  border-left-width: 1px;
+  background-image:
+    linear-gradient(90deg, color-mix(in srgb, var(--section-accent), transparent 96%), transparent 32%),
+    var(--section-bg-glow);
+}
+
+.section.themed::after {
+  content: "";
+  position: absolute;
+  inset: 0 auto auto 0;
+  width: 120px;
+  height: 1px;
+  background: linear-gradient(90deg, var(--section-accent), transparent);
+  opacity: 0.72;
+}
+
+.section.themed .section-title {
+  color: #f8fafc;
+}
+
+/* Buttons + controls ------------------------------------------------------ */
+
+.btn,
+button:not(.mobile-menu-toggle),
+.window-tab,
+.calculator-item,
+.staking-scenario-tab {
+  border-radius: 9px;
+}
+
+.btn {
+  min-height: 40px;
+  border-color: rgba(255, 255, 255, 0.10);
+  box-shadow: none;
+}
+
+.btn-primary {
+  color: #081322;
+  border-color: rgba(37, 177, 252, 0.9);
+  background: linear-gradient(180deg, #4cc4ff, #25b1fc);
+  box-shadow: 0 10px 30px rgba(37, 177, 252, 0.12);
+}
+
+.btn-primary:hover {
+  color: #07101b;
+  border-color: #6fd0ff;
+  background: #5dcbff;
+  transform: translateY(-1px);
+}
+
+.btn-secondary,
+.btn-ghost {
+  color: #e5eaf3;
+  border-color: rgba(255, 255, 255, 0.09);
+  background: rgba(255, 255, 255, 0.025);
+}
+
+.btn-secondary:hover,
+.btn-ghost:hover {
+  border-color: rgba(37, 177, 252, 0.22);
+  background: rgba(37, 177, 252, 0.045);
+}
+
+input:not([type="checkbox"]):not([type="range"]),
+select {
+  color: #f8fafc;
+  border-color: rgba(255, 255, 255, 0.10) !important;
+  background: rgba(9, 8, 24, 0.66) !important;
+  box-shadow: inset 0 1px rgba(255, 255, 255, 0.02);
+}
+
+input:not([type="checkbox"]):not([type="range"]):focus,
+select:focus {
+  outline: none;
+  border-color: rgba(37, 177, 252, 0.55) !important;
+  box-shadow: 0 0 0 3px rgba(37, 177, 252, 0.085);
+}
+
+.window-tabs {
+  border-color: rgba(255, 255, 255, 0.065);
+  background: rgba(7, 6, 19, 0.46);
+}
+
+.window-tab.active {
+  color: #fff;
+  border-color: rgba(37, 177, 252, 0.18);
+  background: rgba(37, 177, 252, 0.08);
+  box-shadow: none;
+}
+
+/* Lists + tables ---------------------------------------------------------- */
+
+.hero-bar-row,
+.chart-row,
+.service-row,
+.provider-row,
+.opportunity-card,
+.provider-card-rich,
+.staking-plan-row {
+  border-color: rgba(255, 255, 255, 0.07);
+  background: rgba(255, 255, 255, 0.018);
+}
+
+.hero-bar-row:hover,
+.chart-row:hover,
+.service-row:hover,
+.provider-row:hover,
+.opportunity-card:hover {
+  transform: none;
+  border-color: rgba(37, 177, 252, 0.22);
+  background: rgba(37, 177, 252, 0.025);
+}
+
+.provider-stats span,
+.pill {
+  border-color: rgba(255, 255, 255, 0.075);
+  background: rgba(255, 255, 255, 0.026);
+}
+
+.explorer-table,
+.mini-table,
+.staking-plan-table {
+  border-color: rgba(255, 255, 255, 0.075);
+  background: rgba(8, 7, 21, 0.34);
+}
+
+.explorer-table th,
+.mini-table th,
+.staking-plan-row.header {
+  color: #909bb0;
+  background: rgba(8, 7, 21, 0.50);
+  letter-spacing: 0.12em;
+}
+
+.explorer-table td,
+.explorer-table th,
+.mini-table td,
+.mini-table th {
+  border-color: rgba(255, 255, 255, 0.055);
+}
+
+.explorer-table tbody tr:hover,
+.mini-table tbody tr:hover {
+  background: rgba(37, 177, 252, 0.025);
+}
+
+/* Charts + progress ------------------------------------------------------- */
+
+.hero-bar-track,
+.chart-track,
+.opportunity-track {
+  height: 4px;
+  background: rgba(255, 255, 255, 0.055);
+}
+
+.hero-bar-fill,
+.chart-fill,
+.opportunity-fill {
+  background: linear-gradient(90deg, #2575fc, #25b1fc, #6ed3ff);
+  box-shadow: 0 0 18px rgba(37, 177, 252, 0.15);
+}
+
+.provider-history-bar {
+  background: linear-gradient(180deg, #4cc4ff, #2575fc);
+  box-shadow: 0 0 18px rgba(37, 177, 252, 0.14);
+}
+
+.provider-history-average {
+  background: rgba(87, 110, 238, 0.38);
+}
+
+/* Rewards calculator ------------------------------------------------------ */
+
+.calculator-section {
+  border-color: rgba(37, 177, 252, 0.13);
+}
+
+.calculator-assumption {
+  border-color: rgba(37, 177, 252, 0.11) !important;
+  background:
+    radial-gradient(circle at 10% 20%, rgba(37, 177, 252, 0.07), transparent 15rem),
+    rgba(10, 8, 26, 0.64);
+}
+
+.calculator-kpi-card-accent {
+  border-color: rgba(37, 177, 252, 0.24) !important;
+  background:
+    linear-gradient(135deg, rgba(37, 177, 252, 0.09), rgba(87, 17, 203, 0.035)) !important;
+}
+
+.calculator-item {
+  border-color: rgba(255, 255, 255, 0.065);
+  background: rgba(255, 255, 255, 0.016);
+}
+
+.calculator-item:hover {
+  border-color: rgba(37, 177, 252, 0.18);
+  background: rgba(37, 177, 252, 0.025);
+}
+
+.calculator-item.is-checked {
+  border-color: rgba(37, 177, 252, 0.30);
+  background:
+    linear-gradient(90deg, rgba(37, 177, 252, 0.075), rgba(87, 17, 203, 0.025));
+  box-shadow: inset 2px 0 0 rgba(37, 177, 252, 0.72);
+}
+
+/* Staking ---------------------------------------------------------------- */
+
+.staking-hero,
+.staking-plan-board,
+.staking-how-it-works {
+  border-color: rgba(255, 255, 255, 0.075);
+}
+
+.staking-plan-row {
+  background: rgba(255, 255, 255, 0.014);
+}
+
+.staking-plan-row.selected {
+  background: linear-gradient(90deg, rgba(37, 177, 252, 0.08), rgba(87, 17, 203, 0.025));
+  box-shadow: inset 2px 0 0 var(--cyan-accent);
+}
+
+.staking-plan-row strong {
+  color: #f1c879;
+}
+
+.staking-verified-badge {
+  border-color: rgba(82, 214, 166, 0.22);
+  background: rgba(82, 214, 166, 0.055);
+  color: #8be2bf;
+}
+
+.staking-method-note {
+  border-color: rgba(37, 177, 252, 0.16);
+  background: rgba(37, 177, 252, 0.035);
+}
+
+/* Footer ----------------------------------------------------------------- */
+
+.site-footer {
+  position: relative;
+  border-top-color: rgba(255, 255, 255, 0.07);
+  background:
+    linear-gradient(180deg, rgba(18, 15, 40, 0.12), rgba(18, 15, 40, 0.92));
+}
+
+.site-footer::before {
+  content: "";
+  position: absolute;
+  inset: 0 0 auto;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, rgba(37, 177, 252, 0.28), transparent);
+}
+
+.site-footer a {
+  color: #aeb8ca;
+}
+
+.site-footer a:hover,
+.site-footer-brand:hover {
+  color: var(--cyan-light);
+}
+
+/* Accessibility + restrained motion ------------------------------------- */
+
+:focus-visible {
+  outline: 2px solid rgba(76, 196, 255, 0.85);
+  outline-offset: 3px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+  }
+}
+
+@media (max-width: 900px) {
+  .page {
+    width: min(100% - 32px, 1400px);
+    gap: 42px;
+  }
+
+  .site-nav {
+    border: 0;
+    background: transparent;
+  }
+}
+
+@media (max-width: 768px) {
+  .site-header {
+    background: rgba(18, 15, 40, 0.96);
+  }
+
+  .site-nav {
+    margin-top: 14px;
+    padding: 18px 0 4px;
+    border-top: 1px solid rgba(255, 255, 255, 0.07);
+  }
+
+  .site-nav-link {
+    border-color: rgba(255, 255, 255, 0.065);
+    background: rgba(255, 255, 255, 0.018);
+  }
+
+  .page {
+    width: 100%;
+    padding-inline: 16px;
+  }
+
+  .section,
+  .panel,
+  .provider-head {
+    border-radius: 16px;
+  }
+}
+
+/* Kleomedes application lockup ------------------------------------------- */
+
+.site-kleomedes-brand {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+  gap: 10px;
+  order: -1;
+  margin-right: 14px;
+  padding-right: 16px;
+  border-right: 1px solid rgba(255, 255, 255, 0.08);
+  color: #f8fafc;
+  white-space: nowrap;
+}
+
+.site-kleomedes-brand:hover {
+  color: var(--cyan-light);
+  text-decoration: none;
+}
+
+.site-kleomedes-brand img {
+  display: block;
+  width: 30px;
+  height: 30px;
+  object-fit: contain;
+  filter: drop-shadow(0 0 14px rgba(37, 177, 252, 0.12));
+}
+
+.site-kleomedes-brand span {
+  font-size: 0.78rem;
+  font-weight: 650;
+  letter-spacing: 0.015em;
+}
+
+@media (min-width: 769px) {
+  .site-header {
+    justify-content: flex-start;
+  }
+
+  .site-header-main {
+    width: 0;
+    flex: 0 0 0;
+    overflow: visible;
+  }
+
+  .site-nav {
+    margin-left: auto;
+  }
+}
+
+@media (max-width: 768px) {
+  .site-header {
+    position: sticky;
+  }
+
+  .site-header-main {
+    min-height: 38px;
+  }
+
+  .site-kleomedes-brand {
+    position: absolute;
+    top: 16px;
+    left: 58px;
+    right: auto;
+    max-width: calc(100vw - 86px);
+    margin-right: 0;
+    padding-left: 0;
+    padding-right: 0;
+    border-left: 0;
+    border-right: 0;
+  }
+
+  .site-kleomedes-brand img {
+    width: 28px;
+    height: 28px;
+  }
+
+  .site-kleomedes-brand span {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    font-size: 0.74rem;
   }
 }

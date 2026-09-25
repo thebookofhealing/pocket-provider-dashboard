@@ -69,16 +69,6 @@ export default function SiteNav() {
   return (
     <header className={`site-header${isMenuOpen ? " menu-is-open" : ""}`}>
       <div className="site-header-main">
-        <Link href="/" className="site-brand" aria-label="Pocket Network dashboard home">
-          <img 
-            src="https://pocket.network/wp-content/uploads/2025/01/logo-white.png" 
-            alt="Pocket Network Logo" 
-            height="32"
-            style={{ width: 'auto', display: 'block' }}
-          />
-          <span style={{ marginLeft: '4px' }}>Network</span>
-        </Link>
-
         <button 
           className="mobile-menu-toggle" 
           onClick={() => setIsMenuOpen(!isMenuOpen)}
@@ -114,6 +104,21 @@ export default function SiteNav() {
           );
         })}
       </nav>
+
+      <a
+        className="site-kleomedes-brand"
+        href="https://kleomedes.cloud/"
+        target="_blank"
+        rel="noopener noreferrer"
+        aria-label="PocketDash by Kleomedes"
+      >
+        <img
+          src="https://kleomedes.cloud/images/logos/kleomedes-logo.png"
+          alt="Kleomedes"
+          height="30"
+        />
+        <span>PocketDash by Kleomedes</span>
+      </a>
     </header>
   );
 }

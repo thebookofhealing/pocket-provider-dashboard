@@ -300,8 +300,9 @@ export default function ChainsExplorerView({ data }: ChainsExplorerViewProps) {
           </div>
         </div>
 
-        <div className="explorer-table-wrap">
-          <table className="mini-table explorer-table">
+        <div className="explorer-table-shell">
+          <div className="explorer-table-wrap">
+            <table className="mini-table explorer-table">
             <thead>
               <tr>
                 {SORT_COLUMNS.map((column) => {
@@ -370,15 +371,16 @@ export default function ChainsExplorerView({ data }: ChainsExplorerViewProps) {
                 </tr>
               )})}
             </tbody>
-          </table>
+            </table>
+          </div>
         </div>
 
         <div className="explorer-pagination">
           <span className="muted">Showing {(page - 1) * pageSize + 1}–{Math.min(page * pageSize, eligibleServices.length)} of {formatInteger(eligibleServices.length)} chains</span>
           <div className="explorer-pagination-controls">
-            <button type="button" className="pill" disabled={page <= 1} onClick={() => setPage((p) => Math.max(1, p - 1))}>Previous</button>
+            <button type="button" className="explorer-page-button" disabled={page <= 1} onClick={() => setPage((p) => Math.max(1, p - 1))}>Previous</button>
             <span className="muted" style={{ margin: '0 8px' }}>Page {page} of {pageCount}</span>
-            <button type="button" className="pill" disabled={page >= pageCount} onClick={() => setPage((p) => Math.min(pageCount, p + 1))}>Next</button>
+            <button type="button" className="explorer-page-button" disabled={page >= pageCount} onClick={() => setPage((p) => Math.min(pageCount, p + 1))}>Next</button>
             <label className="explorer-page-size">
               <span>Rows per page</span>
               <select value={pageSize} onChange={(event) => handlePageSizeChange(Number(event.target.value))}>

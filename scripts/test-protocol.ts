@@ -8,11 +8,13 @@ import {
 } from "@/lib/opportunities";
 import { derivePlanEconomics, isSourceFresh, normalizeSourceTimestamp } from "@/lib/staking-economics";
 import { isEligibleSupplierSnapshotComplete, isEligibleSupplierSnapshotFresh, isEligibleSupplierSnapshotReusable, parseEligibleSupplierSnapshot, selectEligibleSupplierSnapshot } from "@/lib/eligible-suppliers";
-import { __testing as stakingTesting, extractLatestBlockTimestamp, IGNITER_LATEST_BLOCK_QUERY, IGNITER_REWARDS_QUERY } from "@/lib/staking-plans";
+import { __testing as stakingTesting, deriveObservedClientShares, ensureStakingSnapshotV3, extractLatestBlockTimestamp, getStakingDiagnostics, getStakingPlans, IGNITER_LATEST_BLOCK_QUERY, IGNITER_REWARDS_QUERY, STAKING_SNAPSHOT_SCHEMA_VERSION } from "@/lib/staking-plans";
 import { aggregateEligibleSupplierCounts } from "@/lib/eligible-suppliers";
 import { getDeployedSha } from "@/lib/deployment";
 import { resolveEligibleSupplierCounts } from "@/lib/eligible-supplier-source";
+import { buildStakingProjection, getSelectableStakingPlans } from "@/app/staking/staking-dashboard";
 import { ELIGIBLE_SUPPLIER_SNAPSHOT_SCHEMA_VERSION, hasCompleteEligibleSupplierCounts } from "@/lib/cache-contract";
+import { closeDatabaseForTests, getMeta, setMeta } from "@/lib/db";
 
 assert.equal(getSelectionProbability(40, 1), 100, "all eligible suppliers fit within session slots");
 assert.equal(getSelectionProbability(100, 0), 0, "no entering suppliers has no selection probability");
@@ -140,8 +142,43 @@ const liveSnapshot = stakingTesting.buildLivePlans(
 assert.equal(liveSnapshot.stale, false, "fresh source is live");
 assert.equal(liveSnapshot.source, "igniter-indexer", "fresh source is marked live");
 assert.equal(liveSnapshot.plans[0]?.termsVerifiedAt, "2026-09-22", "configured terms carry an explicit verification date");
+assert.ok(liveSnapshot.plans.every((plan) => /^\d{4}-\d{2}-\d{2}$/.test(plan.termsVerifiedAt) && Number.isFinite(plan.clientShare)), "configured client-share terms carry a dated, numeric verification record");
 assert.ok(Math.abs((liveSnapshot.plans[0]?.displayedYield ?? 0) - (17 + 1 / 7)) < 1e-9, "Igniter supplier allocation and seven-day divisor are applied once");
 assert.ok(Math.abs((liveSnapshot.plans[1]?.displayedYield ?? 0) - (17 + 1 / 7)) < 1e-9, "the same allocation path matches a second plan with a different supplier count");
+
+const observedAt = "2026-09-22T12:00:00.000Z";
+const observedUniform = deriveObservedClientShares([
+  { providerDomain: "fixture.example", serviceId: "alpha", supplierOwnerAddress: "owner-a", active: true, revShare: [{ address: "provider", revSharePercentage: "45" }, { address: "OWNER-A", revSharePercentage: "55" }] },
+  { providerDomain: "fixture.example", serviceId: "beta", supplierOwnerAddress: "owner-b", active: true, revShare: [{ address: "owner-b", revSharePercentage: "55" }, { address: "other", revSharePercentage: "45" }] },
+  { providerDomain: "fixture.example", serviceId: "inactive", supplierOwnerAddress: "owner-c", active: false, revShare: [{ address: "owner-c", revSharePercentage: "99" }] }
+], observedAt);
+assert.equal(observedUniform["fixture.example"]?.status, "uniform", "uniform owner revShare is classified as uniform");
+assert.equal(observedUniform["fixture.example"]?.uniformValue, 55, "the matching owner address is selected");
+assert.deepEqual(observedUniform["fixture.example"]?.byService, { alpha: [55], beta: [55] }, "inactive configs are excluded and provider recipients are not selected");
+const observedVariable = deriveObservedClientShares([
+  { providerDomain: "fixture.example", serviceId: "alpha", supplierOwnerAddress: "owner-a", active: true, revShare: [{ address: "owner-a", rev_share_percentage: "50" }] },
+  { providerDomain: "fixture.example", serviceId: "beta", supplierOwnerAddress: "owner-b", active: true, revShare: [{ address: "owner-b", revSharePercentage: "70" }] }
+], observedAt);
+assert.equal(observedVariable["fixture.example"]?.status, "variable", "different service shares remain variable");
+assert.equal(observedVariable["fixture.example"]?.uniformValue, null, "variable shares never become a fake uniform value");
+const observedEconomics = stakingTesting.buildLivePlans(snapshotSource, rewardFixture, 59_500, new Date("2026-09-22T12:00:00.000Z"), fixtureMetadata, observedUniform);
+assert.equal(observedEconomics.plans.find((plan) => plan.id === "fixture")?.clientShare, 55, "uniform observed share drives APR economics");
+assert.equal(observedEconomics.plans.find((plan) => plan.id === "fixture")?.clientShareObservation.source, "pocketdex-onchain", "observed share provenance is persisted");
+assert.equal(observedEconomics.plans.find((plan) => plan.id === "fixture")?.aprMin, undefined, "uniform observed share keeps a single APR");
+const variableEconomics = stakingTesting.buildLivePlans(snapshotSource, rewardFixture, 59_500, new Date("2026-09-22T12:00:00.000Z"), fixtureMetadata, observedVariable);
+assert.equal(variableEconomics.plans.find((plan) => plan.id === "fixture")?.clientShareObservation.status, "variable", "variable observed shares are retained for display");
+const variablePlan = variableEconomics.plans.find((plan) => plan.id === "fixture")!;
+assert.equal(variablePlan.clientShare, variablePlan.clientShareObservation.min, "ranged scalar client share is the observed lower-bound anchor");
+assert.ok((variablePlan.aprMin ?? 0) < (variablePlan.aprMax ?? 0), "variable observed share produces an ordered APR range");
+assert.ok((variablePlan.displayedYieldMin ?? 0) < (variablePlan.displayedYieldMax ?? 0), "variable observed share produces an ordered yield range");
+assert.deepEqual(getSelectableStakingPlans([variablePlan]), [], "variable APR plans are excluded from single-value calculator choices");
+assert.equal(buildStakingProjection(59_500, "new", variablePlan, variablePlan), null, "variable APR plans cannot enter single-value projection math");
+const parsedVariable = stakingTesting.parsePersistedStakingSnapshot(JSON.stringify({ schemaVersion: STAKING_SNAPSHOT_SCHEMA_VERSION, snapshot: variableEconomics }));
+assert.equal(parsedVariable?.plans.find((plan) => plan.id === "fixture")?.aprMin, variablePlan.aprMin, "variable APR lower bound survives persistence");
+assert.equal(parsedVariable?.plans.find((plan) => plan.id === "fixture")?.aprMax, variablePlan.aprMax, "variable APR upper bound survives persistence");
+const noObservationEconomics = stakingTesting.buildLivePlans(snapshotSource, rewardFixture, 59_500, new Date("2026-09-22T12:00:00.000Z"), fixtureMetadata, {});
+assert.equal(noObservationEconomics.plans.find((plan) => plan.id === "fixture")?.clientShareObservation.status, "unavailable", "a missing on-chain observation is explicit");
+assert.equal(noObservationEconomics.plans.find((plan) => plan.id === "fixture")?.clientShare, 50, "configured economics remain an explicitly labeled fallback when observation is unavailable");
 
 const changedShareSnapshot = stakingTesting.buildLivePlans(
   snapshotSource,
@@ -179,6 +216,73 @@ assert.throws(() => stakingTesting.buildLivePlans(
   new Date("2026-09-22T12:00:00.000Z"),
   [{ ...fixtureMetadata[0], clientSharesByService: { alpha: 49, beta: 51 } }]
 ), /no configured public provider plans/, "non-uniform service shares cannot produce an aggregate APR");
+
+const persistedRaw = JSON.stringify({ schemaVersion: STAKING_SNAPSHOT_SCHEMA_VERSION, snapshot: liveSnapshot });
+const parsedPersisted = stakingTesting.parsePersistedStakingSnapshot(persistedRaw);
+assert.ok(parsedPersisted, "a schema-v3 staking snapshot can be hydrated after a process restart");
+assert.equal(parsedPersisted?.minimumSupplierStake, 59_500, "persisted minimum stake survives restart");
+const servedStale = stakingTesting.prepareStakingSnapshotForServing(parsedPersisted!, Date.parse("2026-09-22T12:16:00.000Z"));
+assert.equal(servedStale.stale, true, "an old persisted snapshot is served as stale");
+assert.equal(servedStale.fetchedAt, liveSnapshot.fetchedAt, "stale serving preserves the fetched timestamp");
+assert.equal(servedStale.sourceUpdatedAt, liveSnapshot.sourceUpdatedAt, "stale serving preserves the source timestamp");
+assert.equal(servedStale.plans[0]?.apr, liveSnapshot.plans[0]?.apr, "stale serving preserves the last valid APR");
+assert.match(servedStale.plans[0]?.diagnosticReason ?? "", /15-minute freshness/, "stale serving includes a diagnostic reason");
+
+const legacySnapshot = {
+  ...liveSnapshot,
+  plans: liveSnapshot.plans.map(({ clientShareObservation: _observation, ...plan }) => plan)
+};
+setMeta("staking_snapshot_v3", "");
+setMeta("staking_snapshot_v2", JSON.stringify({ schemaVersion: 2, snapshot: legacySnapshot }));
+const originalMigrationFetch = globalThis.fetch;
+let migrationFetches = 0;
+globalThis.fetch = (async () => {
+  migrationFetches += 1;
+  throw new Error("v2-to-v3 migration must not call upstream sources");
+}) as typeof fetch;
+assert.equal(ensureStakingSnapshotV3(), "migrated", "legacy v2 snapshot is materialized locally as v3");
+globalThis.fetch = originalMigrationFetch;
+assert.equal(migrationFetches, 0, "v2-to-v3 migration performs zero network requests");
+assert.equal(getStakingDiagnostics().snapshotSchemaVersion, 3, "readiness sees the migrated v3 snapshot immediately");
+assert.equal(getStakingDiagnostics().persisted, true, "migrated v3 snapshot is persisted");
+const migrated = stakingTesting.parsePersistedStakingSnapshot(getMeta("staking_snapshot_v3"));
+assert.equal(migrated?.fetchedAt, legacySnapshot.fetchedAt, "migration preserves fetchedAt");
+assert.equal(migrated?.sourceUpdatedAt, legacySnapshot.sourceUpdatedAt, "migration preserves sourceUpdatedAt");
+assert.equal(migrated?.plans[0]?.apr, legacySnapshot.plans[0]?.apr, "migration preserves plan economics");
+
+setMeta("staking_snapshot_v3", persistedRaw);
+setMeta("staking_snapshot_v2", JSON.stringify({ schemaVersion: 2, snapshot: { ...legacySnapshot, fetchedAt: "2000-01-01T00:00:00.000Z" } }));
+assert.equal(ensureStakingSnapshotV3(), "existing", "existing v3 snapshot is not downgraded by legacy data");
+assert.equal(getMeta("staking_snapshot_v3"), persistedRaw, "existing v3 snapshot remains byte-for-byte unchanged");
+
+setMeta("staking_snapshot_v3", "");
+setMeta("staking_snapshot_v2", "");
+assert.equal(ensureStakingSnapshotV3(), "absent", "missing v2 and v3 snapshots do not create a fake v3 snapshot");
+assert.equal(getMeta("staking_snapshot_v3"), "", "missing snapshots remain absent");
+
+const unavailableColdStart = stakingTesting.staticUnavailableSnapshot(new Date("2026-09-22T12:00:00.000Z"));
+assert.ok(unavailableColdStart.plans.every((plan) => plan.rewardStatus === "unavailable"), "no prior staking data is explicitly unavailable");
+const mixedAvailabilityPlans = [
+  liveSnapshot.plans[0]!,
+  { ...liveSnapshot.plans[1]!, apr: 0, displayedYield: 0, rewardStatus: "unavailable" as const, valueSource: "static-cold-start" as const }
+];
+assert.equal(mixedAvailabilityPlans.length, 2, "partial provider outages keep unavailable providers visible in the source plan list");
+assert.deepEqual(getSelectableStakingPlans(mixedAvailabilityPlans).map((plan) => plan.id), [liveSnapshot.plans[0]!.id], "unavailable providers are excluded from calculator choices");
+assert.equal(buildStakingProjection(59_500, "migrate", mixedAvailabilityPlans[1], mixedAvailabilityPlans[0]), null, "an unavailable current plan cannot enter migration projection math");
+assert.equal(buildStakingProjection(59_500, "new", mixedAvailabilityPlans[0], mixedAvailabilityPlans[1]), null, "an unavailable target plan cannot enter new-stake projection math");
+
+const originalFetch = globalThis.fetch;
+let requestPathFetches = 0;
+stakingTesting.resetLastSuccessfulSnapshot();
+stakingTesting.persistStakingSnapshot(liveSnapshot);
+globalThis.fetch = (async () => {
+  requestPathFetches += 1;
+  throw new Error("request path must not call upstream sources");
+}) as typeof fetch;
+getStakingPlans();
+globalThis.fetch = originalFetch;
+assert.equal(requestPathFetches, 0, "the Staking request path does not invoke network refresh");
+assert.equal(getStakingPlans().plans[0]?.apr, liveSnapshot.plans[0]?.apr, "the request path renders persisted Staking data");
 
 (async () => {
   stakingTesting.resetLastSuccessfulSnapshot();
@@ -221,6 +325,43 @@ assert.throws(() => stakingTesting.buildLivePlans(
   }, cacheStart), /REST unavailable/, "incomplete local and failed upstream sources fail closed");
   const firstSnapshot = { ...liveSnapshot, fetchedAt: "2026-09-22T12:00:00.000Z", sourceUpdatedAt: "2026-09-22T11:50:00.000Z" };
   assert.equal((await stakingTesting.loadStakingPlans(async () => firstSnapshot, cacheStart)).source, "igniter-indexer");
+  const partiallyRefreshed = stakingTesting.buildPartialPlans(
+    snapshotSource.sourceUpdatedAt,
+    snapshotSource.allocation?.value ?? null,
+    59_500,
+    "live",
+    "live",
+    new Map([
+      ["fixture.example", { services: rewardFixture.get("fixture.example") ?? [] }],
+      ["fixture-two.example", { services: [], error: "provider unavailable" }]
+    ]),
+    new Date("2026-09-22T12:00:00.000Z"),
+    fixtureMetadata
+  );
+  const failedProvider = partiallyRefreshed.plans.find((plan) => plan.id === "fixture-two");
+  const healthyProvider = partiallyRefreshed.plans.find((plan) => plan.id === "fixture");
+  assert.equal(failedProvider?.rewardStatus, "stale", "one provider failure is isolated as stale");
+  assert.equal(failedProvider?.apr, liveSnapshot.plans.find((plan) => plan.id === "fixture-two")?.apr, "provider failure retains the persisted APR");
+  assert.notEqual(failedProvider?.apr, 0, "provider failure never overwrites valid APR with zero");
+  assert.equal(partiallyRefreshed.stale, false, "a provider-level failure does not globally stale a fresh snapshot");
+  const servedPartiallyRefreshed = stakingTesting.prepareStakingSnapshotForServing(partiallyRefreshed, Date.parse("2026-09-22T12:01:00.000Z"));
+  assert.equal(servedPartiallyRefreshed.plans.find((plan) => plan.id === "fixture")?.rewardStatus, "live", "healthy provider remains live after request-path serving");
+  assert.equal(servedPartiallyRefreshed.plans.find((plan) => plan.id === "fixture-two")?.rewardStatus, "stale", "failed provider remains stale after request-path serving");
+  assert.equal(healthyProvider?.rewardStatus, "live", "healthy provider is live before persistence");
+  stakingTesting.resetLastSuccessfulSnapshot();
+  await stakingTesting.loadStakingPlans(async () => observedEconomics, cacheStart);
+  const observedLkg = stakingTesting.buildPartialPlans(
+    snapshotSource.sourceUpdatedAt,
+    snapshotSource.allocation?.value ?? null,
+    59_500,
+    "live",
+    "live",
+    new Map([["fixture.example", { services: [], error: "PocketDex/reward source unavailable" }]]),
+    new Date("2026-09-22T12:01:00.000Z"),
+    fixtureMetadata
+  );
+  assert.equal(observedLkg.plans.find((plan) => plan.id === "fixture")?.clientShareObservation.source, "pocketdex-onchain", "refresh failure retains the last observed on-chain share");
+  stakingTesting.resetLastSuccessfulSnapshot();
   let refreshAttempted = false;
   const refreshedSnapshot = { ...firstSnapshot, fetchedAt: "2026-09-22T12:06:00.000Z", sourceUpdatedAt: "2026-09-22T12:05:00.000Z" };
   const refreshed = await stakingTesting.loadStakingPlans(async () => { refreshAttempted = true; return refreshedSnapshot; }, Date.parse("2026-09-22T12:06:00.000Z"));
@@ -240,4 +381,4 @@ assert.throws(() => stakingTesting.buildLivePlans(
 })().catch((error) => {
   console.error(error);
   process.exitCode = 1;
-});
+}).finally(() => closeDatabaseForTests());

@@ -21,8 +21,8 @@ fetch_with_retry() {
 
 fetch_with_retry "$LOCAL_BASE_URL/api/dashboard?window=30d" "$TMP_DIR/dashboard.json"
 fetch_with_retry "$LOCAL_BASE_URL/staking" "$TMP_DIR/staking.html"
-# Fetch health last: the cold-process Staking request may warm its snapshot, so
-# diagnostics must be read after that request rather than from the initial boot.
+# Fetch health last: Staking only reads the already-persisted local snapshot,
+# so health is an independent post-deploy check rather than a refresh trigger.
 fetch_with_retry "$LOCAL_BASE_URL/api/health" "$TMP_DIR/health.json"
 
 EXPECTED_SHA="$EXPECTED_SHA" python3 - "$TMP_DIR/health.json" "$TMP_DIR/dashboard.json" "$TMP_DIR/staking.html" <<'PY'
@@ -60,7 +60,9 @@ top5 = materialized.get("top5") or []
 assert top5 and all(isinstance(item.get("eligibleSupplierCount"), (int, float)) and item.get("eligibleSupplierCountStale") is False for item in top5), "dashboard top-five diagnostics are incomplete"
 
 providers = staking_diag.get("providers") or []
+assert staking_diag.get("snapshotSchemaVersion") == 3 and staking_diag.get("persisted") is True, "staking snapshot is not durable schema v3 data"
 assert any(provider.get("valueSource") in ("live-derived", "stale-derived", "provider-lkg") for provider in providers), "staking has no upstream-derived provider row"
+assert any(provider.get("clientShareSource") in ("pocketdex-onchain", "configured-fallback") and provider.get("clientShareStatus") in ("uniform", "variable", "unavailable") for provider in providers), "staking client-share observation provenance is missing"
 assert "Live rewards" in staking or "Stale" in staking, "staking page did not render reward freshness state"
 
 deployed_sha = diagnostics.get("deployedSha")

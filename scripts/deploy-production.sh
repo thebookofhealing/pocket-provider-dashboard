@@ -232,7 +232,7 @@ export DEPLOY_ROOT
 log "reloading PM2 web and indexer"
 pm2 startOrReload "$CURRENT_LINK/ecosystem.config.cjs" --update-env
 
-log "verifying web and indexer"
+log "verifying web, indexer, and durable Staking schema v3"
 healthy=0
 valid_samples=0
 first_indexed_after=0
@@ -244,6 +244,7 @@ for _ in $(seq 1 30); do
   if [[ -n "$health_after" ]] && curl --fail --silent --show-error --max-time 5 http://127.0.0.1:3100/ >/dev/null; then
     snapshot="$(pm2 jlist | node -e 'let s=""; process.stdin.on("data", d => s += d).on("end", () => { const a=JSON.parse(s).find(x => x.name === "pocket-indexer"); process.stdout.write(a ? `${a.pm2_env?.status ?? "unknown"}:${a.pm2_env?.restart_time ?? -1}` : "absent:-1"); });')"
     if [[ -n "$(pm2 pid pocket-dashboard)" && -n "$(pm2 pid pocket-indexer)" && "$snapshot" == online:* ]] \
+      && printf '%s' "$health_after" | python3 "$release_dir/scripts/staking_readiness.py" >/dev/null \
       && HEALTH="$health_after" node -e 'const h=JSON.parse(process.env.HEALTH); const i=h.indexer; if (!i || i.isLocked !== true || !Number.isFinite(Number(i.highestIngestedHeight)) || !Number.isFinite(Number(i.contiguousHeight))) process.exit(1);'; then
       indexed_after="$(HEALTH="$health_after" node -e 'const h=JSON.parse(process.env.HEALTH); process.stdout.write(String(Number(h.indexer.highestIngestedHeight)));')"
       (( valid_samples += 1 ))

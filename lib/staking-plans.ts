@@ -1,8 +1,12 @@
 import { derivePlanEconomics, isSourceFresh, normalizeSourceTimestamp } from "@/lib/staking-economics";
+import { getMeta, isDatabaseReadOnly, setMeta } from "@/lib/db";
 
 export const DEFAULT_POKT_PER_SUPPLIER = 59_500;
 export const MINIMUM_DISPLAY_APR = 10;
 const REFRESH_INTERVAL_MS = 15 * 60 * 1000;
+export const STAKING_SNAPSHOT_SCHEMA_VERSION = 3;
+export const STAKING_SNAPSHOT_META_KEY = "staking_snapshot_v3";
+const LEGACY_STAKING_SNAPSHOT_META_KEY = "staking_snapshot_v2";
 const IGNITER_GRAPHQL_URL = "https://data.pocket.network/";
 const POCKET_REST_URL = "https://sauron-api.infra.pocket.network";
 
@@ -18,20 +22,46 @@ export const IGNITER_ALLOCATION_QUERY = `query SupplierMintAllocation {
 
 export type RewardStatus = "live" | "stale" | "unavailable";
 export type PlanValueSource = "live-derived" | "stale-derived" | "provider-lkg" | "static-cold-start";
+export type ObservedClientShareStatus = "uniform" | "variable" | "unavailable";
+export type ObservedClientShareSource = "pocketdex-onchain" | "configured-fallback";
+
+export type ObservedClientShare = {
+  status: ObservedClientShareStatus;
+  min: number | null;
+  max: number | null;
+  uniformValue: number | null;
+  source: ObservedClientShareSource;
+  observedAt: string | null;
+  byService?: Record<string, number[]>;
+};
+
+export type ObservedClientShareInput = {
+  providerDomain: string;
+  serviceId: string;
+  supplierOwnerAddress: string | null;
+  active: boolean;
+  revShare: unknown;
+};
+export type ObservedClientShares = Record<string, ObservedClientShare>;
 
 export type PublicPlan = {
   id: string;
   provider: string;
   plan: string;
   apr: number;
+  aprMin?: number;
+  aprMax?: number;
   clientShare: number;
   displayedYield: number;
+  displayedYieldMin?: number;
+  displayedYieldMax?: number;
   termsVerifiedAt: string;
   website?: string;
   rewardStatus: RewardStatus;
   valueSource: PlanValueSource;
   sourceUpdatedAt: string | null;
   fetchedAt: string;
+  clientShareObservation: ObservedClientShare;
   diagnosticReason?: string;
 };
 
@@ -86,6 +116,64 @@ const PLAN_METADATA: ProviderPlanMetadata[] = [
   { id: "easy2stake-public", provider: "Easy2stake", plan: "igniter-1-eu-a", clientShare: 50, termsVerifiedAt: "2026-09-22", domain: "easy2stake.com", website: "https://www.easy2stake.com/" }
 ];
 
+function configuredClientShareObservation(clientShare: number, observedAt: string | null): ObservedClientShare {
+  return { status: "uniform", min: clientShare, max: clientShare, uniformValue: clientShare, source: "configured-fallback", observedAt };
+}
+
+function unavailableClientShareObservation(observedAt: string | null): ObservedClientShare {
+  return { status: "unavailable", min: null, max: null, uniformValue: null, source: "pocketdex-onchain", observedAt };
+}
+
+function parseRevShareEntries(value: unknown): Array<{ address: string; percentage: number }> {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((entry) => {
+    if (!entry || typeof entry !== "object") return [];
+    const record = entry as Record<string, unknown>;
+    const address = typeof record.address === "string" ? record.address : "";
+    const raw = record.revSharePercentage ?? record.rev_share_percentage ?? record.revShare ?? record.rev_share;
+    const percentage = toNumber(raw);
+    return address && percentage != null && percentage >= 0 && percentage <= 100 ? [{ address: address.toLowerCase(), percentage }] : [];
+  });
+}
+
+/** Aggregates active PocketDex supplier configs by provider domain. */
+export function deriveObservedClientShares(inputs: ObservedClientShareInput[], observedAt: string | null): ObservedClientShares {
+  const byProvider = new Map<string, Map<string, number[]>>();
+  for (const input of inputs) {
+    if (!input.active || !input.providerDomain || !input.supplierOwnerAddress) continue;
+    const owner = input.supplierOwnerAddress.toLowerCase();
+    const ownerShare = parseRevShareEntries(input.revShare).find((entry) => entry.address === owner)?.percentage;
+    if (ownerShare == null) continue;
+    const services = byProvider.get(input.providerDomain) ?? new Map<string, number[]>();
+    const values = services.get(input.serviceId) ?? [];
+    values.push(ownerShare);
+    services.set(input.serviceId, values);
+    byProvider.set(input.providerDomain, services);
+  }
+
+  return Object.fromEntries(Array.from(byProvider.entries()).map(([domain, services]) => {
+    const byService = Object.fromEntries(Array.from(services.entries()).map(([serviceId, values]) => [serviceId, values]));
+    const allValues = Object.values(byService).flat();
+    const min = Math.min(...allValues);
+    const max = Math.max(...allValues);
+    const uniform = max - min <= 0.05;
+    return [domain, {
+      status: uniform ? "uniform" : "variable",
+      min,
+      max,
+      uniformValue: uniform ? allValues[0] : null,
+      source: "pocketdex-onchain",
+      observedAt,
+      byService
+    } satisfies ObservedClientShare];
+  }));
+}
+
+function observationForPlan(metadata: ProviderPlanMetadata, observedShares: ObservedClientShares | undefined, previous?: ObservedClientShare): ObservedClientShare {
+  if (observedShares !== undefined) return observedShares[metadata.domain] ?? unavailableClientShareObservation(null);
+  return previous ?? configuredClientShareObservation(metadata.clientShare, null);
+}
+
 function getPlanDomain(planId: string): string | null {
   return PLAN_METADATA.find((metadata) => metadata.id === planId)?.domain ?? null;
 }
@@ -98,6 +186,7 @@ const LAST_KNOWN_GOOD = [
   { ...PLAN_METADATA[4], apr: 13.5, displayedYield: 22.19 }
 ].map(({ domain: _domain, ...plan }) => ({
   ...plan,
+  clientShareObservation: configuredClientShareObservation(plan.clientShare, "2026-09-22T00:00:00.000Z"),
   rewardStatus: "unavailable" as const,
   valueSource: "static-cold-start" as const,
   sourceUpdatedAt: null,
@@ -112,6 +201,170 @@ let lastAllocationValue: string | null = null;
 let lastMinimumStake: number | null = null;
 type GraphQLResponse<T> = { data?: T; errors?: Array<{ message: string }> };
 
+type PersistedStakingSnapshot = {
+  schemaVersion: typeof STAKING_SNAPSHOT_SCHEMA_VERSION;
+  snapshot: StakingPlansSnapshot;
+};
+
+function cloneSnapshot(snapshot: StakingPlansSnapshot): StakingPlansSnapshot {
+  return {
+    ...snapshot,
+    plans: snapshot.plans.map((plan) => ({
+      ...plan,
+      clientShareObservation: {
+        ...plan.clientShareObservation,
+        byService: plan.clientShareObservation.byService ? Object.fromEntries(Object.entries(plan.clientShareObservation.byService).map(([service, values]) => [service, [...values]])) : undefined
+      }
+    }))
+  };
+}
+
+function rememberSnapshot(snapshot: StakingPlansSnapshot): StakingPlansSnapshot {
+  const remembered = cloneSnapshot(snapshot);
+  lastServedSnapshot = remembered;
+  lastSuccessfulSnapshot = remembered;
+  lastProviderPlans = new Map(remembered.plans.filter((plan) => plan.rewardStatus !== "unavailable").map((plan) => [plan.id, { ...plan }]));
+  lastMinimumStake = remembered.minimumSupplierStake > 0 ? remembered.minimumSupplierStake : lastMinimumStake;
+  return remembered;
+}
+
+function staticUnavailableSnapshot(now = new Date()): StakingPlansSnapshot {
+  const fetchedAt = now.toISOString();
+  return {
+    plans: LAST_KNOWN_GOOD.map((plan) => ({ ...plan, fetchedAt })),
+    fetchedAt,
+    sourceUpdatedAt: null,
+    minimumSupplierStake: DEFAULT_POKT_PER_SUPPLIER,
+    stale: true,
+    source: "last-known-good",
+    allocationStatus: "unavailable",
+    minimumStakeStatus: "unavailable"
+  };
+}
+
+function isPublicPlan(value: unknown): value is PublicPlan {
+  if (!value || typeof value !== "object") return false;
+  const plan = value as Partial<PublicPlan>;
+  return typeof plan.id === "string" && typeof plan.provider === "string" && typeof plan.plan === "string" &&
+    typeof plan.apr === "number" && typeof plan.clientShare === "number" && typeof plan.displayedYield === "number" &&
+    typeof plan.termsVerifiedAt === "string" && typeof plan.fetchedAt === "string" &&
+    (plan.rewardStatus === "live" || plan.rewardStatus === "stale" || plan.rewardStatus === "unavailable") &&
+    (plan.valueSource === "live-derived" || plan.valueSource === "stale-derived" || plan.valueSource === "provider-lkg" || plan.valueSource === "static-cold-start");
+}
+
+function parseClientShareObservation(value: unknown, fallbackShare: number, fallbackObservedAt: string): ObservedClientShare {
+  if (!value || typeof value !== "object") return configuredClientShareObservation(fallbackShare, fallbackObservedAt);
+  const observation = value as Partial<ObservedClientShare>;
+  const validStatus = observation.status === "uniform" || observation.status === "variable" || observation.status === "unavailable";
+  const validSource = observation.source === "pocketdex-onchain" || observation.source === "configured-fallback";
+  if (!validStatus || !validSource || (observation.observedAt !== null && typeof observation.observedAt !== "string")) {
+    return configuredClientShareObservation(fallbackShare, fallbackObservedAt);
+  }
+  return {
+    status: observation.status as ObservedClientShareStatus,
+    min: typeof observation.min === "number" ? observation.min : null,
+    max: typeof observation.max === "number" ? observation.max : null,
+    uniformValue: typeof observation.uniformValue === "number" ? observation.uniformValue : null,
+    source: observation.source as ObservedClientShareSource,
+    observedAt: observation.observedAt ?? null,
+    byService: observation.byService
+  };
+}
+
+function normalizeSnapshotPlans(snapshot: StakingPlansSnapshot): StakingPlansSnapshot {
+  return {
+    ...snapshot,
+    plans: snapshot.plans.map((plan) => ({
+      ...plan,
+      clientShareObservation: parseClientShareObservation(plan.clientShareObservation, plan.clientShare, plan.termsVerifiedAt)
+    }))
+  };
+}
+
+function isStakingSnapshotShape(snapshot: Partial<StakingPlansSnapshot>): snapshot is StakingPlansSnapshot {
+  return Array.isArray(snapshot.plans) && snapshot.plans.every(isPublicPlan) && typeof snapshot.fetchedAt === "string" &&
+    (snapshot.source === "igniter-indexer" || snapshot.source === "last-known-good") &&
+    (snapshot.allocationStatus === "live" || snapshot.allocationStatus === "stale" || snapshot.allocationStatus === "unavailable") &&
+    (snapshot.minimumStakeStatus === "live" || snapshot.minimumStakeStatus === "stale" || snapshot.minimumStakeStatus === "unavailable") &&
+    typeof snapshot.minimumSupplierStake === "number";
+}
+
+function parseLegacyStakingSnapshot(raw: string | null): StakingPlansSnapshot | null {
+  if (!raw) return null;
+  try {
+    const record = JSON.parse(raw) as { schemaVersion?: number; snapshot?: Partial<StakingPlansSnapshot> };
+    if (record.schemaVersion !== 2 || !record.snapshot || !isStakingSnapshotShape(record.snapshot)) return null;
+    return cloneSnapshot(normalizeSnapshotPlans(record.snapshot));
+  } catch {
+    return null;
+  }
+}
+
+export function parsePersistedStakingSnapshot(raw: string | null): StakingPlansSnapshot | null {
+  if (!raw) return null;
+  try {
+    const record = JSON.parse(raw) as Partial<PersistedStakingSnapshot>;
+    if (record.schemaVersion !== STAKING_SNAPSHOT_SCHEMA_VERSION || !record.snapshot || typeof record.snapshot !== "object") return null;
+    const snapshot = record.snapshot as Partial<StakingPlansSnapshot>;
+    if (!isStakingSnapshotShape(snapshot)) return null;
+    return cloneSnapshot(normalizeSnapshotPlans(snapshot as StakingPlansSnapshot));
+  } catch {
+    return null;
+  }
+}
+
+function readPersistedStakingSnapshot(): StakingPlansSnapshot | null {
+  try {
+    const current = parsePersistedStakingSnapshot(getMeta(STAKING_SNAPSHOT_META_KEY));
+    if (current) return current;
+    return parseLegacyStakingSnapshot(getMeta(LEGACY_STAKING_SNAPSHOT_META_KEY));
+  } catch {
+    return null;
+  }
+}
+
+function persistStakingSnapshot(snapshot: StakingPlansSnapshot): void {
+  if (isDatabaseReadOnly()) return;
+  const record: PersistedStakingSnapshot = { schemaVersion: STAKING_SNAPSHOT_SCHEMA_VERSION, snapshot: cloneSnapshot(snapshot) };
+  setMeta(STAKING_SNAPSHOT_META_KEY, JSON.stringify(record));
+}
+
+/**
+ * Materializes the durable v3 representation from a legacy v2 snapshot without
+ * contacting any upstream source. This runs synchronously during indexer
+ * startup so deployment readiness does not depend on live refresh latency.
+ */
+export function ensureStakingSnapshotV3(): "existing" | "migrated" | "absent" {
+  if (parsePersistedStakingSnapshot(getMeta(STAKING_SNAPSHOT_META_KEY))) return "existing";
+  const legacy = parseLegacyStakingSnapshot(getMeta(LEGACY_STAKING_SNAPSHOT_META_KEY));
+  if (!legacy) return "absent";
+  persistStakingSnapshot(legacy);
+  return "migrated";
+}
+
+function markSnapshotStale(snapshot: StakingPlansSnapshot, reason: string): StakingPlansSnapshot {
+  return {
+    ...cloneSnapshot(snapshot),
+    stale: true,
+    source: "last-known-good",
+    allocationStatus: snapshot.allocationStatus === "live" ? "stale" : snapshot.allocationStatus,
+    minimumStakeStatus: snapshot.minimumStakeStatus === "live" ? "stale" : snapshot.minimumStakeStatus,
+    plans: snapshot.plans.map((plan) => plan.rewardStatus === "unavailable" ? { ...plan } : {
+      ...plan,
+      rewardStatus: "stale",
+      valueSource: plan.valueSource === "static-cold-start" ? "static-cold-start" : "provider-lkg",
+      diagnosticReason: reason
+    })
+  };
+}
+
+export function prepareStakingSnapshotForServing(snapshot: StakingPlansSnapshot, now = Date.now()): StakingPlansSnapshot {
+  const fetchedAt = new Date(snapshot.fetchedAt).getTime();
+  const fresh = !snapshot.stale && Number.isFinite(fetchedAt) && fetchedAt <= now && now - fetchedAt < REFRESH_INTERVAL_MS &&
+    isSourceFresh(snapshot.sourceUpdatedAt, now, REFRESH_INTERVAL_MS);
+  return fresh ? cloneSnapshot(snapshot) : markSnapshotStale(snapshot, "persisted staking snapshot is outside the 15-minute freshness window");
+}
+
 export function extractLatestBlockTimestamp(source: IgniterLatestBlock): string | null {
   const timestamp = source.blocks?.nodes?.[0]?.timestamp;
   if (timestamp == null) return null;
@@ -124,6 +377,8 @@ export function extractLatestBlockTimestamp(source: IgniterLatestBlock): string 
 }
 
 export function getStakingDiagnostics(): {
+  snapshotSchemaVersion: number | null;
+  persisted: boolean;
   fetchedAt: string | null;
   sourceUpdatedAt: string | null;
   stale: boolean;
@@ -139,11 +394,18 @@ export function getStakingDiagnostics(): {
     valueSource: PlanValueSource;
     sourceUpdatedAt: string | null;
     fetchedAt: string;
+    clientShareStatus: ObservedClientShareStatus;
+    clientShareSource: ObservedClientShareSource;
+    clientShareObservedAt: string | null;
     reason: string | null;
   }>;
 } {
-  const snapshot = lastServedSnapshot;
+  const persisted = readPersistedStakingSnapshot();
+  const currentPersisted = parsePersistedStakingSnapshot(getMeta(STAKING_SNAPSHOT_META_KEY));
+  const snapshot = lastServedSnapshot ?? (persisted ? prepareStakingSnapshotForServing(persisted) : null);
   return {
+    snapshotSchemaVersion: currentPersisted ? STAKING_SNAPSHOT_SCHEMA_VERSION : persisted ? 2 : null,
+    persisted: Boolean(persisted),
     fetchedAt: snapshot?.fetchedAt ?? null,
     sourceUpdatedAt: snapshot?.sourceUpdatedAt ?? null,
     stale: snapshot?.stale ?? true,
@@ -159,6 +421,9 @@ export function getStakingDiagnostics(): {
       valueSource: plan.valueSource,
       sourceUpdatedAt: plan.sourceUpdatedAt,
       fetchedAt: plan.fetchedAt,
+      clientShareStatus: plan.clientShareObservation.status,
+      clientShareSource: plan.clientShareObservation.source,
+      clientShareObservedAt: plan.clientShareObservation.observedAt,
       reason: plan.diagnosticReason ?? null
     }))
   };
@@ -196,6 +461,34 @@ function getUniformClientShare(metadata: ProviderPlanMetadata): number | null {
   return maximum - minimum <= 0.05 ? configuredShares[0] : null;
 }
 
+type DerivedPlanEconomics = {
+  clientShare: number;
+  economics: ReturnType<typeof derivePlanEconomics>;
+  range?: { min: ReturnType<typeof derivePlanEconomics>; max: ReturnType<typeof derivePlanEconomics> };
+};
+
+function deriveClientShareEconomics(
+  grossSevenDayPerSupplierUpokt: number,
+  metadata: ProviderPlanMetadata,
+  observation: ObservedClientShare,
+  minimumStake: number
+): DerivedPlanEconomics | null {
+  if (observation.source === "pocketdex-onchain" && observation.status === "uniform" && observation.uniformValue != null) {
+    return { clientShare: observation.uniformValue, economics: derivePlanEconomics(grossSevenDayPerSupplierUpokt, observation.uniformValue, minimumStake) };
+  }
+  if (observation.source === "pocketdex-onchain" && observation.status === "variable" && observation.min != null && observation.max != null) {
+    // Reward responses currently lack stable service IDs, so use the observed
+    // provider-wide min/max as an explicit envelope rather than averaging shares.
+    const min = derivePlanEconomics(grossSevenDayPerSupplierUpokt, observation.min, minimumStake);
+    const max = derivePlanEconomics(grossSevenDayPerSupplierUpokt, observation.max, minimumStake);
+    // The scalar fields are the conservative lower-bound anchor whenever the
+    // persisted plan also carries an observed range.
+    return { clientShare: observation.min, economics: min, range: { min, max } };
+  }
+  const configuredShare = getUniformClientShare(metadata);
+  return configuredShare == null ? null : { clientShare: configuredShare, economics: derivePlanEconomics(grossSevenDayPerSupplierUpokt, configuredShare, minimumStake) };
+}
+
 async function fetchMinimumSupplierStake(): Promise<number> {
   const response = await fetch(`${POCKET_REST_URL}/pokt-network/poktroll/supplier/params`, { cache: "no-store", signal: AbortSignal.timeout(10_000) });
   if (!response.ok) throw new Error(`Pocket supplier params returned ${response.status}`);
@@ -210,7 +503,8 @@ export function buildLivePlans(
   rewardsByDomain: Map<string, IgniterRewardService[]>,
   minimumStake: number,
   now = new Date(),
-  metadata = PLAN_METADATA
+  metadata = PLAN_METADATA,
+  observedShares?: ObservedClientShares
 ): StakingPlansSnapshot {
   const sourceUpdatedAt = normalizeSourceTimestamp(source.sourceUpdatedAt);
   const allocationValue = source.allocation?.value;
@@ -238,22 +532,24 @@ export function buildLivePlans(
       // supplier count, then the UI divides the seven-day total by seven.
       grossSevenDayPerSupplierUpokt += Math.floor(gross * supplierAllocation) / suppliers;
     }
-    const clientShare = getUniformClientShare(planMetadata);
-    if (clientShare == null) return null;
-    const economics = derivePlanEconomics(grossSevenDayPerSupplierUpokt, clientShare, minimumStake);
+    const observation = observationForPlan(planMetadata, observedShares);
+    const derived = deriveClientShareEconomics(grossSevenDayPerSupplierUpokt, planMetadata, observation, minimumStake);
+    if (!derived) return null;
     return {
       ...planMetadata,
-      clientShare,
-      displayedYield: economics.netDailyPokt,
-      apr: economics.apr,
+      clientShare: derived.clientShare,
+      displayedYield: derived.economics.netDailyPokt,
+      ...(derived.range ? { displayedYieldMin: derived.range.min.netDailyPokt, displayedYieldMax: derived.range.max.netDailyPokt, aprMin: derived.range.min.apr, aprMax: derived.range.max.apr } : {}),
+      apr: derived.economics.apr,
       rewardStatus: isSourceFresh(sourceUpdatedAt, now.getTime(), REFRESH_INTERVAL_MS) ? "live" : "stale",
       valueSource: isSourceFresh(sourceUpdatedAt, now.getTime(), REFRESH_INTERVAL_MS) ? "live-derived" : "stale-derived",
       sourceUpdatedAt,
-      fetchedAt: now.toISOString()
+      fetchedAt: now.toISOString(),
+      clientShareObservation: observation
     };
   }).filter((plan): plan is PublicPlan => plan !== null)
     .filter((plan) => plan.apr > MINIMUM_DISPLAY_APR)
-    .sort((a, b) => b.apr - a.apr || a.provider.localeCompare(b.provider));
+    .sort((a, b) => (b.aprMin ?? b.apr) - (a.aprMin ?? a.apr) || a.provider.localeCompare(b.provider));
   if (plans.length === 0) throw new Error("Pocket GraphQL returned no configured public provider plans");
 
   const sourceFresh = isSourceFresh(sourceUpdatedAt, now.getTime(), REFRESH_INTERVAL_MS);
@@ -279,6 +575,7 @@ function unavailablePlan(metadata: ProviderPlanMetadata, now: Date, sourceUpdate
     valueSource: "static-cold-start",
     sourceUpdatedAt,
     fetchedAt: now.toISOString(),
+    clientShareObservation: configuredClientShareObservation(metadata.clientShare, null),
     diagnosticReason: reason
   };
 }
@@ -290,7 +587,9 @@ function deriveProviderPlan(
   minimumStake: number,
   now: Date,
   sourceUpdatedAt: string,
-  sourceFresh: boolean
+  sourceFresh: boolean,
+  observedShares?: ObservedClientShares,
+  previousObservation?: ObservedClientShare
 ): PublicPlan | null {
   let grossSevenDayPerSupplierUpokt = 0;
   for (const service of services) {
@@ -299,18 +598,20 @@ function deriveProviderPlan(
     if (gross == null || suppliers == null || suppliers <= 0) return null;
     grossSevenDayPerSupplierUpokt += Math.floor(gross * supplierAllocation) / suppliers;
   }
-  const clientShare = getUniformClientShare(metadata);
-  if (clientShare == null) return null;
-  const economics = derivePlanEconomics(grossSevenDayPerSupplierUpokt, clientShare, minimumStake);
+  const observation = observationForPlan(metadata, observedShares, previousObservation);
+  const derived = deriveClientShareEconomics(grossSevenDayPerSupplierUpokt, metadata, observation, minimumStake);
+  if (!derived) return null;
   return {
     ...metadata,
-    clientShare,
-    displayedYield: economics.netDailyPokt,
-    apr: economics.apr,
+    clientShare: derived.clientShare,
+    displayedYield: derived.economics.netDailyPokt,
+    ...(derived.range ? { displayedYieldMin: derived.range.min.netDailyPokt, displayedYieldMax: derived.range.max.netDailyPokt, aprMin: derived.range.min.apr, aprMax: derived.range.max.apr } : {}),
+    apr: derived.economics.apr,
     rewardStatus: sourceFresh ? "live" : "stale",
     valueSource: sourceFresh ? "live-derived" : "stale-derived",
     sourceUpdatedAt,
-    fetchedAt: now.toISOString()
+    fetchedAt: now.toISOString(),
+    clientShareObservation: observation
   };
 }
 
@@ -321,37 +622,43 @@ function buildPartialPlans(
   allocationStatus: "live" | "stale" | "unavailable",
   minimumStakeStatus: "live" | "stale" | "unavailable",
   rewardEntries: Map<string, { services: IgniterRewardService[]; error?: string }>,
-  now: Date
+  now: Date,
+  metadata = PLAN_METADATA,
+  observedShares?: ObservedClientShares
 ): StakingPlansSnapshot {
   const sourceFresh = isSourceFresh(sourceUpdatedAt, now.getTime(), REFRESH_INTERVAL_MS);
   const supplierAllocation = parseSupplierAllocation(allocationValue);
-  const plans = PLAN_METADATA.map((metadata): PublicPlan => {
-    const entry = rewardEntries.get(metadata.domain);
+  const plans = metadata.map((planMetadata): PublicPlan => {
+    const entry = rewardEntries.get(planMetadata.domain);
     const reason = entry?.error ?? (!entry || entry.services.length === 0 ? "provider reward query returned no usable services" : null);
     const livePlan = supplierAllocation != null && minimumStake != null && Boolean(sourceUpdatedAt) && !reason
-      ? deriveProviderPlan(metadata, entry?.services ?? [], supplierAllocation, minimumStake, now, sourceUpdatedAt as string, sourceFresh)
+      ? deriveProviderPlan(planMetadata, entry?.services ?? [], supplierAllocation, minimumStake, now, sourceUpdatedAt as string, sourceFresh, observedShares, lastProviderPlans.get(planMetadata.id)?.clientShareObservation)
       : null;
     if (livePlan) {
-      lastProviderPlans.set(metadata.id, livePlan);
+      lastProviderPlans.set(planMetadata.id, livePlan);
       return livePlan;
     }
-    const previous = lastProviderPlans.get(metadata.id);
+    const previous = lastProviderPlans.get(planMetadata.id);
     if (previous) {
       return {
         ...previous,
         rewardStatus: "stale" as const,
         valueSource: "provider-lkg" as const,
-        fetchedAt: now.toISOString(),
         diagnosticReason: reason ?? (sourceUpdatedAt ? "upstream source is stale" : "latest source timestamp unavailable")
       };
     }
-    return unavailablePlan(metadata, now, sourceUpdatedAt, reason ?? "global staking input unavailable");
+    const unavailable = unavailablePlan(planMetadata, now, sourceUpdatedAt, reason ?? "global staking input unavailable");
+    if (observedShares !== undefined) unavailable.clientShareObservation = observedShares[planMetadata.domain] ?? unavailableClientShareObservation(null);
+    return unavailable;
   }).filter((plan): plan is PublicPlan => plan != null)
-    .sort((a, b) => b.apr - a.apr || a.provider.localeCompare(b.provider));
+    .sort((a, b) => (b.aprMin ?? b.apr) - (a.aprMin ?? a.apr) || a.provider.localeCompare(b.provider));
 
   const liveDerivedCount = plans.filter((plan) => plan.valueSource === "live-derived").length;
   const anyDerivedCount = plans.filter((plan) => plan.valueSource !== "static-cold-start").length;
-  const stale = plans.some((plan) => plan.rewardStatus !== "live") || allocationStatus !== "live" || minimumStakeStatus !== "live" || !sourceFresh;
+  // A provider-level outage is represented on that provider's row only. The
+  // snapshot remains globally fresh when its shared inputs and source anchor
+  // are fresh, so healthy live rows are not rewritten as stale on read.
+  const stale = allocationStatus !== "live" || minimumStakeStatus !== "live" || !sourceFresh;
   return {
     plans,
     fetchedAt: now.toISOString(),
@@ -364,7 +671,15 @@ function buildPartialPlans(
   };
 }
 
-async function fetchLivePlans(): Promise<StakingPlansSnapshot> {
+async function fetchLivePlans(observedShares?: ObservedClientShares): Promise<StakingPlansSnapshot> {
+  // Interim source hierarchy: the local SQLite index currently stores settlement
+  // facts and supplier/domain dimensions, but it does not materialize the
+  // provider address-group service configuration plus the historical
+  // per-service staked-supplier counts that Igniter uses for this exact
+  // seven-day calculation. Recomputing APR locally would therefore change the
+  // semantics. Keep the bounded GraphQL refresh as the background source of
+  // record, with the durable snapshot as the fail-closed fallback; #29 tracks
+  // authoritative live plan-term ingestion separately.
   const now = new Date();
   const [latestResult, allocationResult, minimumStakeResult] = await Promise.allSettled([
     fetchGraphQL<IgniterLatestBlock>(IGNITER_LATEST_BLOCK_QUERY),
@@ -395,7 +710,7 @@ async function fetchLivePlans(): Promise<StakingPlansSnapshot> {
       rewardResults.push([metadata.domain, { services: [], error: result.reason instanceof Error ? result.reason.message : String(result.reason) }]);
     }
   });
-  return buildPartialPlans(sourceUpdatedAt, allocationValue, minimumStake, allocationStatus, minimumStakeStatus, new Map(rewardResults), now);
+  return buildPartialPlans(sourceUpdatedAt, allocationValue, minimumStake, allocationStatus, minimumStakeStatus, new Map(rewardResults), now, PLAN_METADATA, observedShares);
 }
 
 async function loadStakingPlans(fetcher: () => Promise<StakingPlansSnapshot> = fetchLivePlans, now = Date.now()): Promise<StakingPlansSnapshot> {
@@ -404,9 +719,7 @@ async function loadStakingPlans(fetcher: () => Promise<StakingPlansSnapshot> = f
     return lastSuccessfulSnapshot;
   }
   try {
-    lastSuccessfulSnapshot = await fetcher();
-    lastServedSnapshot = lastSuccessfulSnapshot;
-    return lastSuccessfulSnapshot;
+    return rememberSnapshot(await fetcher());
   } catch (error) {
     const refreshError = error instanceof StakingRefreshError ? error : null;
     console.warn("[pocket-dashboard:staking] live refresh failed", {
@@ -447,10 +760,53 @@ async function loadStakingPlans(fetcher: () => Promise<StakingPlansSnapshot> = f
   }
 }
 
-export const getStakingPlans = () => loadStakingPlans();
+/**
+ * Refreshes the durable Staking snapshot. This is intentionally only called by
+ * the indexer/background process; the web request path uses getStakingPlans()
+ * below and never invokes an upstream fetch.
+ */
+export async function refreshStakingSnapshot(observedShares?: ObservedClientShares): Promise<StakingPlansSnapshot> {
+  const persisted = readPersistedStakingSnapshot();
+  if (persisted) rememberSnapshot(persisted);
+
+  try {
+    const refreshed = await fetchLivePlans(observedShares);
+    const previous = persisted ?? lastSuccessfulSnapshot;
+    const durable = refreshed.plans.some((plan) => plan.rewardStatus !== "unavailable")
+      ? refreshed
+      : previous
+        ? markSnapshotStale(previous, "refresh returned no usable provider economics; retaining persisted values")
+        : refreshed;
+    persistStakingSnapshot(durable);
+    rememberSnapshot(durable);
+    return durable;
+  } catch (error) {
+    const fallback = persisted ?? lastSuccessfulSnapshot ?? staticUnavailableSnapshot();
+    const stale = markSnapshotStale(fallback, `staking refresh failed: ${error instanceof Error ? error.message : String(error)}`);
+    persistStakingSnapshot(stale);
+    rememberSnapshot(stale);
+    return stale;
+  }
+}
+
+/** Read-only request-path accessor. It performs a local SQLite metadata read only. */
+export function getStakingPlans(): StakingPlansSnapshot {
+  const persisted = readPersistedStakingSnapshot();
+  const snapshot = persisted ? prepareStakingSnapshotForServing(persisted) : staticUnavailableSnapshot();
+  rememberSnapshot(snapshot);
+  return snapshot;
+}
+
 export const __testing = {
   fetchLivePlans,
   loadStakingPlans,
+  parsePersistedStakingSnapshot,
+  prepareStakingSnapshotForServing,
+  staticUnavailableSnapshot,
+  persistStakingSnapshot,
+  ensureStakingSnapshotV3,
+  refreshStakingSnapshot,
+  buildPartialPlans,
   buildLivePlans,
   resetLastSuccessfulSnapshot: () => {
     lastSuccessfulSnapshot = null;

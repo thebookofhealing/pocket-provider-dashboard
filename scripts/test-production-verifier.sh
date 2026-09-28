@@ -19,4 +19,14 @@ health_line="$(grep -n 'fetch_with_retry "\$LOCAL_BASE_URL/api/health"' "$script
 }
 
 bash -n "$script"
+grep -q 'snapshotSchemaVersion") == 3' "$script"
+grep -q 'clientShareSource' "$script"
+bash "$(cd "$(dirname "$script")" && pwd)/test-staking-readiness.sh"
+
+staking_page="$(cd "$(dirname "$script")/.." && pwd)/app/staking/page.tsx"
+if grep -Eq 'fetchLivePlans|fetch\(' "$staking_page"; then
+  echo "staking page must not contain request-time upstream fetches" >&2
+  exit 1
+fi
+
 echo "production verifier warm-cache ordering passed"

@@ -18,11 +18,46 @@ function formatPokt(value: number, maximumFractionDigits = 0): string {
 }
 
 function planLabel(plan: PublicPlan): string {
-  return `${plan.provider} — ${plan.apr.toFixed(1)}% APR`;
+  return `${plan.provider} — ${plan.rewardStatus === "unavailable" ? "Unavailable" : `${plan.apr.toFixed(1)}% APR`}`;
 }
 
-function projectedRewards(stakedPokt: number, apr: number, month: number): number {
-  return stakedPokt * (apr / 100) * (month / 12);
+export function isSelectableStakingPlan(plan: PublicPlan): boolean {
+  return plan.rewardStatus !== "unavailable" && plan.clientShareObservation?.status !== "variable" && plan.aprMin == null && plan.aprMax == null && Number.isFinite(plan.apr) && Number.isFinite(plan.displayedYield);
+}
+
+export function getSelectableStakingPlans(plans: PublicPlan[]): PublicPlan[] {
+  return plans.filter(isSelectableStakingPlan);
+}
+
+export function projectedRewards(stakedPokt: number, plan: PublicPlan | null | undefined, month: number): number | null {
+  if (!plan || !isSelectableStakingPlan(plan)) return null;
+  return stakedPokt * (plan.apr / 100) * (month / 12);
+}
+
+export function buildStakingProjection(
+  stakedPokt: number,
+  scenario: Scenario | null,
+  currentPlan: PublicPlan | null | undefined,
+  targetPlan: PublicPlan | null | undefined
+): { points: Array<{ month: number; current: number; target: number }>; currentRewards: number; targetRewards: number; difference: number } | null {
+  if (!targetPlan || !isSelectableStakingPlan(targetPlan)) return null;
+  if (scenario === "migrate" && (!currentPlan || !isSelectableStakingPlan(currentPlan))) return null;
+
+  const points = Array.from({ length: PROJECTION_MONTHS }, (_, index) => {
+    const month = index + 1;
+    return {
+      month,
+      current: scenario === "migrate" ? projectedRewards(stakedPokt, currentPlan, month)! : 0,
+      target: projectedRewards(stakedPokt, targetPlan, month)!
+    };
+  });
+  const last = points.at(-1)!;
+  return {
+    points,
+    currentRewards: last.current,
+    targetRewards: last.target,
+    difference: last.target - last.current
+  };
 }
 
 function formatFetchedAt(value: string): string {
@@ -35,47 +70,82 @@ function formatTermsVerifiedAt(value: string): string {
   return Number.isNaN(date.getTime()) ? value : new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", year: "numeric", timeZone: "UTC" }).format(date);
 }
 
+function planYieldLabel(plan: PublicPlan): string {
+  if (plan.rewardStatus === "unavailable") return "Unavailable";
+  if (plan.displayedYieldMin != null && plan.displayedYieldMax != null) return `${plan.displayedYieldMin.toFixed(2)}–${plan.displayedYieldMax.toFixed(2)} POKT/supplier`;
+  return `${plan.displayedYield.toFixed(2)} POKT/supplier`;
+}
+
+function planAprLabel(plan: PublicPlan): string {
+  if (plan.rewardStatus === "unavailable") return "Unavailable";
+  if (plan.aprMin != null && plan.aprMax != null) return `${plan.aprMin.toFixed(1)}–${plan.aprMax.toFixed(1)}%`;
+  return `${plan.apr.toFixed(1)}%`;
+}
+
+function hasVariableApr(plan: PublicPlan): boolean {
+  return plan.aprMin != null && plan.aprMax != null && plan.aprMax > plan.aprMin;
+}
+
+function clientShareMethodology(plan: PublicPlan | undefined): string {
+  if (!plan) return "No usable on-chain observation is available; APR uses the configured fallback terms dated 2026-09-22.";
+  const observation = plan.clientShareObservation;
+  if (observation.source === "pocketdex-onchain" && observation.status === "uniform") {
+    return "Client share is derived from the current on-chain supplier owner rev-share observed via PocketDex.";
+  }
+  if (observation.source === "pocketdex-onchain" && observation.status === "variable") {
+    return "Observed on-chain client share varies across current supplier configurations. The APR range applies the observed minimum and maximum client shares to the current trailing 7-day reward rate. PocketDash cannot yet determine which configuration corresponds to the advertised public plan.";
+  }
+  return `No usable on-chain observation is available; APR uses the configured fallback of ${plan.clientShare.toFixed(1)}%, terms dated ${formatTermsVerifiedAt(plan.termsVerifiedAt)}.`;
+}
+
+function clientShareDisplay(plan: PublicPlan): { value: string; detail: string } {
+  const observation = plan.clientShareObservation;
+  const observedAt = observation?.observedAt ? ` · observed ${formatFetchedAt(observation.observedAt)}` : "";
+  if (observation?.source === "pocketdex-onchain") {
+    if (observation.status === "uniform" && observation.uniformValue != null) {
+      return { value: `${observation.uniformValue.toFixed(1)}%`, detail: `On-chain observed${observedAt}` };
+    }
+    if (observation.status === "variable" && observation.min != null && observation.max != null) {
+      return { value: `${observation.min.toFixed(1)}–${observation.max.toFixed(1)}%`, detail: `Varies by service · On-chain observed${observedAt}` };
+    }
+    return { value: "Unavailable", detail: `Configured fallback · terms dated ${formatTermsVerifiedAt(plan.termsVerifiedAt)}` };
+  }
+  return { value: `${plan.clientShare.toFixed(1)}%`, detail: `Configured fallback · terms dated ${formatTermsVerifiedAt(plan.termsVerifiedAt)}` };
+}
+
 type StakingDashboardProps = StakingPlansSnapshot;
 
 export default function StakingDashboard({ plans: publicPlans, fetchedAt, sourceUpdatedAt, minimumSupplierStake, stale }: StakingDashboardProps) {
   const PUBLIC_PLANS = publicPlans;
+  const selectablePlans = getSelectableStakingPlans(PUBLIC_PLANS);
   const [scenario, setScenario] = useState<Scenario | null>(null);
   const [supplierCount, setSupplierCount] = useState(1);
-  const [currentPlanId, setCurrentPlanId] = useState(publicPlans.at(-1)?.id ?? "");
-  const [targetPlanId, setTargetPlanId] = useState(publicPlans[0]?.id ?? "");
+  const [currentPlanId, setCurrentPlanId] = useState(selectablePlans.at(-1)?.id ?? "");
+  const [targetPlanId, setTargetPlanId] = useState(selectablePlans[0]?.id ?? "");
 
-  const currentPlan = PUBLIC_PLANS.find((plan) => plan.id === currentPlanId) ?? PUBLIC_PLANS.at(-1)!;
-  const targetPlan = PUBLIC_PLANS.find((plan) => plan.id === targetPlanId) ?? PUBLIC_PLANS[0];
-  if (!currentPlan || !targetPlan) {
+  const currentPlan = selectablePlans.find((plan) => plan.id === currentPlanId) ?? selectablePlans.at(-1);
+  const targetPlan = selectablePlans.find((plan) => plan.id === targetPlanId) ?? selectablePlans[0];
+  if (PUBLIC_PLANS.length === 0) {
     return <main className="page staking-page"><section className="panel section explorer-empty"><h1 className="section-title">Staking plans are temporarily unavailable.</h1><p className="section-subtitle">Igniter did not return a usable public plan feed. Please try again shortly.</p></section></main>;
   }
   const poktPerSupplier = minimumSupplierStake || POKT_PER_SUPPLIER;
   const stakedPokt = supplierCount * poktPerSupplier;
 
-  const projection = useMemo(() => {
-    const points = Array.from({ length: PROJECTION_MONTHS }, (_, index) => {
-      const month = index + 1;
-      return {
-        month,
-        current: scenario === "migrate" ? projectedRewards(stakedPokt, currentPlan.apr, month) : 0,
-        target: projectedRewards(stakedPokt, targetPlan.apr, month),
-      };
-    });
-    const last = points.at(-1)!;
-    return {
-      points,
-      currentRewards: last.current,
-      targetRewards: last.target,
-      difference: last.target - last.current,
-    };
-  }, [currentPlan.apr, scenario, stakedPokt, targetPlan.apr]);
+  const projection = useMemo(() => buildStakingProjection(stakedPokt, scenario, currentPlan, targetPlan) ?? {
+    points: Array.from({ length: PROJECTION_MONTHS }, (_, index) => ({ month: index + 1, current: 0, target: 0 })),
+    currentRewards: 0,
+    targetRewards: 0,
+    difference: 0
+  }, [currentPlan, scenario, stakedPokt, targetPlan]);
 
-  const aprDelta = scenario === "migrate" ? targetPlan.apr - currentPlan.apr : targetPlan.apr;
+  const aprDelta = scenario === "migrate" && currentPlan && targetPlan ? targetPlan.apr - currentPlan.apr : targetPlan?.apr ?? 0;
   const monthlyDifference = projection.difference / PROJECTION_MONTHS;
   const projectedRewardMaximum = Math.max(1, ...projection.points.flatMap((point) => [point.current, point.target]));
   const chartAxisMaximum = Math.max(10_000, Math.ceil(projectedRewardMaximum / 10_000) * 10_000);
   const isPositive = projection.difference >= 0;
-  const hasScenario = scenario !== null;
+  const hasAvailablePlan = selectablePlans.length > 0;
+  const hasScenario = scenario !== null && hasAvailablePlan;
+  const termsPlan = targetPlan ?? selectablePlans[0] ?? PUBLIC_PLANS[0];
   const monthLabels = useMemo(() => {
     const currentMonth = new Date();
     const formatter = new Intl.DateTimeFormat("en-US", { month: "short" });
@@ -126,13 +196,36 @@ export default function StakingDashboard({ plans: publicPlans, fetchedAt, source
         </aside>
       </section>
 
+      <section className="panel section staking-how-it-works">
+        <div>
+          <span className="eyebrow eyebrow-ghost">Getting started</span>
+          <h2 className="section-title">How does staking work?</h2>
+        </div>
+
+        <ol className="staking-steps">
+          <li>Use your Keplr or Soothe wallet to access Igniter via <a href="https://staking.pocket.network" target="_blank" rel="noreferrer">staking.pocket.network</a>.</li>
+          <li>Once your wallet is connected, click on <b>Providers</b> to view your staking options.</li>
+          <li>Select your provider, click <b>Stake</b> and follow the prompts to set up your supplier.</li>
+        </ol>
+
+        <div className="staking-facts">
+          <h3>Facts about staking</h3>
+          <div className="staking-fact-grid">
+            <p><b>Staking is non-custodial:</b> Your tokens stay in your wallet, and only you control them.</p>
+            <p><b>Unstaking Period:</b> Tokens become liquid in your wallet after 21 days.</p>
+            <p><b>Automatic rewards:</b> Rewards flow directly to the wallet you staked from—no claiming required.</p>
+            <p><b>Track rewards:</b> View your staking rewards in Igniter’s <b>Overview</b> tab.</p>
+          </div>
+        </div>
+      </section>
+
       <section className="panel section staking-plan-board">
         <div className="section-title-row">
           <div>
             <span className="eyebrow eyebrow-ghost">Public plan leaderboard</span>
             <h2 className="section-title">Public provider plans</h2>
             <p className="section-subtitle">
-              Ranked highest to lowest based on current trailing 7-day APR. <span className={stale ? "staking-feed-status stale" : "staking-feed-status"}>{stale ? "Stale" : "Live rewards"} · fetched {formatFetchedAt(fetchedAt)}{sourceUpdatedAt ? ` · source ${formatFetchedAt(sourceUpdatedAt)}` : ""}</span>
+              Ranked highest to lowest based on current trailing 7-day APR; ranges rank by their lower bound. <span className={stale ? "staking-feed-status stale" : "staking-feed-status"}>{stale ? "Stale" : "Live rewards"} · fetched {formatFetchedAt(fetchedAt)}{sourceUpdatedAt ? ` · source ${formatFetchedAt(sourceUpdatedAt)}` : ""}</span>
             </p>
           </div>
         </div>
@@ -154,21 +247,31 @@ export default function StakingDashboard({ plans: publicPlans, fetchedAt, source
                   {plan.rewardStatus === "live" ? "Live" : plan.rewardStatus === "stale" ? "Stale" : "Unavailable"}
                 </small>
               </span>
-              <span role="cell">{plan.displayedYield.toFixed(2)} <small>POKT/supplier</small></span>
-              <span className="staking-client-share" role="cell"><span>{plan.clientShare.toFixed(1)}%</span><small>Configured · verified {formatTermsVerifiedAt(plan.termsVerifiedAt)}</small></span>
-              <strong role="cell">{plan.apr.toFixed(1)}%</strong>
+              <span role="cell">{planYieldLabel(plan)}</span>
+              <span className="staking-client-share" role="cell"><span>{clientShareDisplay(plan).value}</span><small>{clientShareDisplay(plan).detail}</small></span>
+              <strong className="staking-apr-cell" role="cell">
+                <span>{planAprLabel(plan)}</span>
+                {hasVariableApr(plan) && (
+                  <span className="staking-tooltip-wrap staking-apr-tooltip-wrap">
+                    <button className="staking-apr-info" type="button" aria-label="Why this APR is a range" aria-describedby={`staking-apr-tooltip-${plan.id}`}>i</button>
+                    <span className="staking-tooltip" id={`staking-apr-tooltip-${plan.id}`} role="tooltip">
+                      This provider has multiple on-chain client-share configurations, likely reflecting a mix of public and private plans. PocketDash cannot yet reliably identify which configuration maps to the advertised public plan, so the APR is shown as a range.
+                    </span>
+                  </span>
+                )}
+              </strong>
             </div>
           ))}
         </div>
       </section>
 
       <section className={`staking-scenario-tabs ${hasScenario ? "" : "awaiting-selection"}`} aria-label="Choose a staking scenario">
-        <button aria-pressed={scenario === "new"} className={scenario === "new" ? "active" : ""} onClick={() => setScenario("new")} type="button">
+        <button aria-pressed={scenario === "new"} className={scenario === "new" ? "active" : ""} disabled={!hasAvailablePlan} onClick={() => setScenario("new")} type="button">
           <span className="staking-choice-marker" aria-hidden="true" />
           <b>Stake POKT from your wallet</b>
           <small>Projects your rewards for a new supplier allocation</small>
         </button>
-        <button aria-pressed={scenario === "migrate"} className={scenario === "migrate" ? "active" : ""} onClick={() => setScenario("migrate")} type="button">
+        <button aria-pressed={scenario === "migrate"} className={scenario === "migrate" ? "active" : ""} disabled={!hasAvailablePlan} onClick={() => setScenario("migrate")} type="button">
           <span className="staking-choice-marker" aria-hidden="true" />
           <b>Move existing suppliers</b>
           <small>Compare the opportunity cost of your current supplier allocation</small>
@@ -194,7 +297,7 @@ export default function StakingDashboard({ plans: publicPlans, fetchedAt, source
             <label className="staking-input-group">
               <span>Currently staked with</span>
               <select disabled={!hasScenario} value={currentPlanId} onChange={(event) => setCurrentPlanId(event.target.value)}>
-                {PUBLIC_PLANS.map((plan) => <option key={plan.id} value={plan.id}>{planLabel(plan)}</option>)}
+                {selectablePlans.map((plan) => <option key={plan.id} value={plan.id}>{planLabel(plan)}</option>)}
               </select>
             </label>
           )}
@@ -202,7 +305,7 @@ export default function StakingDashboard({ plans: publicPlans, fetchedAt, source
           <label className="staking-input-group">
             <span>{scenario === "migrate" ? "Move suppliers to" : scenario === "new" ? "Public plan" : "Provider plan"}</span>
             <select disabled={!hasScenario} value={targetPlanId} onChange={(event) => setTargetPlanId(event.target.value)}>
-              {PUBLIC_PLANS.map((plan) => <option key={plan.id} value={plan.id}>{planLabel(plan)}</option>)}
+              {selectablePlans.map((plan) => <option key={plan.id} value={plan.id}>{planLabel(plan)}</option>)}
             </select>
           </label>
 
@@ -243,7 +346,7 @@ export default function StakingDashboard({ plans: publicPlans, fetchedAt, source
 
           <div className="staking-method-note">
             <span aria-hidden="true">i</span>
-            <p><b>How APR is calculated</b> Net POKT earned per supplier per day × 365 ÷ minimum supplier stake. This is a backward-looking 7 day average and does not guarantee future performance. We will add 14 and 30 day trailing APR in the future.<br /><small>Client share is a configured plan term, verified {formatTermsVerifiedAt(targetPlan.termsVerifiedAt)}; reward performance and the minimum stake refresh separately.</small></p>
+            <p><b>How APR is calculated</b> Net POKT earned per supplier per day × 365 ÷ minimum supplier stake. This is a backward-looking 7 day average and does not guarantee future performance. We will add 14 and 30 day trailing APR in the future.<br /><small>{clientShareMethodology(termsPlan)} Reward performance and the minimum stake refresh separately.</small></p>
           </div>
         </article>
 
@@ -262,15 +365,15 @@ export default function StakingDashboard({ plans: publicPlans, fetchedAt, source
               {!hasScenario
                 ? "Six-month simple return"
                 : scenario === "migrate"
-                ? `${Math.abs(aprDelta).toFixed(1)} percentage points ${aprDelta >= 0 ? "higher" : "lower"} than ${currentPlan.provider}.`
-                : `Based on ${targetPlan.apr.toFixed(1)}% APR for ${supplierCount.toLocaleString()} supplier${supplierCount === 1 ? "" : "s"}.`}
+                ? `${Math.abs(aprDelta).toFixed(1)} percentage points ${aprDelta >= 0 ? "higher" : "lower"} than ${currentPlan?.provider ?? "the current provider"}.`
+                : `Based on ${(targetPlan?.apr ?? 0).toFixed(1)}% APR for ${supplierCount.toLocaleString()} supplier${supplierCount === 1 ? "" : "s"}.`}
             </p>
           </div>
 
           {scenario === "migrate" && (
             <div className="staking-chart-legend" aria-hidden="true">
-              <span><i className="current" /> Stay with {currentPlan.provider}</span>
-              <span><i className="target" /> Move to {targetPlan.provider}</span>
+              <span><i className="current" /> Stay with {currentPlan?.provider ?? "current provider"}</span>
+              <span><i className="target" /> Move to {targetPlan?.provider ?? "target provider"}</span>
             </div>
           )}
 
@@ -278,19 +381,19 @@ export default function StakingDashboard({ plans: publicPlans, fetchedAt, source
             <div className="staking-chart-content">
               <div className="staking-comparison-chart">
                 {[0, 25, 50, 75, 100].map((percentage) => <i className="staking-chart-gridline" key={percentage} style={{ bottom: `${percentage}%` }} />)}
-                {projection.points.map((point) => (
+                {hasScenario && projection.points.map((point) => (
                   <div className="staking-month-column" key={point.month}>
                     {scenario === "migrate" && (
                       <span
                         className="staking-comparison-bar current"
                         style={{ height: `${Math.max(3, (point.current / chartAxisMaximum) * 100)}%` }}
-                        title={`${currentPlan.provider}, month ${point.month}: ${formatPokt(point.current)} POKT`}
+                        title={`${currentPlan?.provider ?? "current provider"}, month ${point.month}: ${formatPokt(point.current)} POKT`}
                       />
                     )}
                     <span
                       className="staking-comparison-bar target"
                       style={{ height: `${Math.max(3, (point.target / chartAxisMaximum) * 100)}%` }}
-                      title={`${targetPlan.provider}, month ${point.month}: ${formatPokt(point.target)} POKT`}
+                      title={`${targetPlan?.provider ?? "target provider"}, month ${point.month}: ${formatPokt(point.target)} POKT`}
                     />
                   </div>
                 ))}
@@ -311,38 +414,21 @@ export default function StakingDashboard({ plans: publicPlans, fetchedAt, source
           <div className="staking-result-grid panel-inset">
             <div><span>POKT Staked</span><strong>{hasScenario ? formatPokt(stakedPokt) : "—"}</strong></div>
             <div><span>{scenario === "migrate" ? "Monthly Reward Difference" : "Monthly POKT Rewards"}</span><strong className={hasScenario ? (monthlyDifference >= 0 ? "staking-accent" : "staking-loss") : ""}>{hasScenario ? `${monthlyDifference >= 0 ? "+" : "−"}${formatPokt(Math.abs(monthlyDifference))}` : "—"}</strong></div>
-            <div><span>Projected Plan APR</span><strong>{hasScenario ? `${targetPlan.apr.toFixed(1)}%` : "—"}</strong></div>
+            <div><span>Projected Plan APR</span><strong>{hasScenario ? `${(targetPlan?.apr ?? 0).toFixed(1)}%` : "—"}</strong></div>
           </div>
         </article>
       </section>
 
-      <section className="panel section staking-how-it-works">
-        <div>
-          <span className="eyebrow eyebrow-ghost">Getting started</span>
-          <h2 className="section-title">How does staking work?</h2>
-        </div>
-
-        <ol className="staking-steps">
-          <li>Use your Keplr or Soothe wallet to access Igniter via <a href="https://staking.pocket.network" target="_blank" rel="noreferrer">staking.pocket.network</a>.</li>
-          <li>Once your wallet is connected, click on <b>Providers</b> to view your staking options.</li>
-            <li>Select your provider, click <b>Stake</b> and follow the prompts to set up your supplier.</li>
-        </ol>
-
-        <div className="staking-facts">
-          <h3>Facts about staking</h3>
-          <div className="staking-fact-grid">
-            <p><b>Staking is non-custodial:</b> Your tokens stay in your wallet, and only you control them.</p>
-            <p><b>Unstaking Period:</b> Tokens become liquid in your wallet after 21 days.</p>
-            <p><b>Automatic rewards:</b> Rewards flow directly to the wallet you staked from—no claiming required.</p>
-            <p><b>Track rewards:</b> View your staking rewards in Igniter’s <b>Overview</b> tab.</p>
-          </div>
-        </div>
-      </section>
-
       <section className="panel section staking-notes">
-        <div><span className="staking-note-icon">01</span><h3>APR is not a promise</h3><p>Provider performance, service mix, session selection, uptime, protocol economics, and commission can all change your rewards.</p></div>
-        <div><span className="staking-note-icon">02</span><h3>Historical Rewards</h3><p>Seven-day APR can change quickly, so keep an eye on your providers performance.</p></div>
-        <div><span className="staking-note-icon">03</span><h3>Verify before migrating</h3><p>Be aware of the 21-day unstaking period, fees, and variability in rewards prior to staking or moving your suppliers.</p></div>
+        <div className="staking-notes-header">
+          <span className="eyebrow eyebrow-ghost">Calculator guidance</span>
+          <h2 className="section-title">Calculator Disclaimers</h2>
+        </div>
+        <div className="staking-notes-grid">
+          <div><span className="staking-note-icon">01</span><h3>APR is not a promise</h3><p>Provider performance, service mix, session selection, uptime, protocol economics, and commission can all change your rewards.</p></div>
+          <div><span className="staking-note-icon">02</span><h3>Historical Rewards</h3><p>Seven-day APR can change quickly, so keep an eye on your providers performance.</p></div>
+          <div><span className="staking-note-icon">03</span><h3>Verify before migrating</h3><p>Be aware of the 21-day unstaking period, fees, and variability in rewards prior to staking or moving your suppliers.</p></div>
+        </div>
       </section>
 
       <p className="footer-note staking-disclaimer">

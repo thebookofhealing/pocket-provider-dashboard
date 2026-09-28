@@ -251,6 +251,11 @@ export function getIndexerHealth(): IndexerHealth {
 
 let db: Database.Database;
 
+/** Test-only lifecycle hook so native SQLite statements are finalized before Node exits. */
+export function closeDatabaseForTests(): void {
+  if (db?.open) db.close();
+}
+
 if (isReadOnly) {
   if (!configuredDbPath) {
     throw new Error("POCKET_SQLITE_PATH must be set when POCKET_DB_READONLY=true");

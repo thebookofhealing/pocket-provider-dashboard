@@ -49,6 +49,7 @@ import { DEFAULT_RPC_URLS } from "@/lib/rpc-status";
 import { aggregateEligibleSupplierCounts, parseEligibleSupplierSnapshot, type EligibleSupplierPage, type EligibleSupplierSnapshot } from "@/lib/eligible-suppliers";
 import { resolveEligibleSupplierCounts, type EligibleSupplierCountsSnapshot } from "@/lib/eligible-supplier-source";
 import { ELIGIBLE_SUPPLIER_SNAPSHOT_SCHEMA_VERSION, DASHBOARD_CACHE_SCHEMA_VERSION } from "@/lib/cache-contract";
+import { deriveObservedClientShares, ensureStakingSnapshotV3, refreshStakingSnapshot, type ObservedClientShareInput, type ObservedClientShares } from "@/lib/staking-plans";
 
 type RpcEvent = {
   type: string;
@@ -111,12 +112,34 @@ type PoktscanEligibleSupplierConfigsResponse = {
   };
 };
 
+type PoktscanObservedSupplierConfigsResponse = {
+  data?: {
+    supplierServiceConfigs?: {
+      nodes?: Array<{
+        serviceId?: string | null;
+        domains?: unknown;
+        endpoints?: unknown;
+        revShare?: unknown;
+        supplier?: { ownerId?: string | null; operatorId?: string | null; stakeStatus?: string | null } | null;
+      } | null>;
+      pageInfo?: { hasNextPage?: boolean; endCursor?: string | null } | null;
+    } | null;
+  };
+};
+
 // This connection is the current supplier-service configuration table, not a
 // historical reward/event stream. Its complete pagination pass is therefore
 // the GraphQL equivalent of the REST active supplier enumeration.
 const ELIGIBLE_SUPPLIER_CONFIGS_QUERY = `query CurrentSupplierServiceConfigs($after: Cursor) {
   supplierServiceConfigs(first: 1000, after: $after) {
     nodes { serviceId supplierId }
+    pageInfo { hasNextPage endCursor }
+  }
+}`;
+
+const OBSERVED_SUPPLIER_CONFIGS_QUERY = `query ObservedSupplierServiceConfigs($after: Cursor) {
+  supplierServiceConfigs(first: 1000, after: $after) {
+    nodes { serviceId domains endpoints revShare supplier { ownerId operatorId stakeStatus } }
     pageInfo { hasNextPage endCursor }
   }
 }`;
@@ -238,11 +261,13 @@ const REPAIR_BATCH_SIZE = Number(process.env.POCKET_INDEXER_REPAIR_BATCH_SIZE ??
 const REPAIR_CONCURRENCY = Number(process.env.POCKET_INDEXER_REPAIR_CONCURRENCY ?? 4);
 const REPAIR_FAILED_COOLDOWN_MS = Number(process.env.POCKET_INDEXER_REPAIR_FAILED_COOLDOWN_MS ?? 300_000);
 const REPAIR_MAX_FAILED_RETRIES = Number(process.env.POCKET_INDEXER_REPAIR_MAX_FAILED_RETRIES ?? 10);
+const STAKING_REFRESH_INTERVAL_MS = Number(process.env.POCKET_INDEXER_STAKING_REFRESH_INTERVAL_MS ?? 15 * 60 * 1000);
 const MIGRATION_MAX_RETRIES = 3;
 const MIGRATION_RETRY_DELAY_MS = 5000;
 const WINDOWS: TimeWindow[] = ["24h", "7d", "30d"];
 const SETTLEMENT_EVENT_TYPE = "pocket.tokenomics.EventClaimSettled";
 const SECOND_LEVEL_SUFFIXES = new Set(["co.uk", "org.uk", "com.au", "net.au", "co.jp", "com.br"]);
+const STAKING_PROVIDER_DOMAINS = new Set(["kleomedes.cloud", "kalorius.tech", "nodefleet.net", "purroofgroup.com", "easy2stake.com"]);
 const SUPPLIER_REWARD_REASONS = new Set([
   "TLM_RELAY_BURN_EQUALS_MINT_SUPPLIER_SHAREHOLDER_REWARD_DISTRIBUTION",
   "TLM_GLOBAL_MINT_SUPPLIER_SHAREHOLDER_REWARD_DISTRIBUTION"
@@ -252,12 +277,32 @@ let lastCacheBuildAt = 0;
 let cacheDirty = true;
 let liveCatchupInFlight = false;
 let lastSessionSyncAt = 0;
+let lastStakingRefreshAt = 0;
 const SESSION_SYNC_INTERVAL_MS = 60 * 60 * 1000;
 const SESSION_FRESHNESS_MS = 60 * 60 * 1000;
 const INDEXER_DATA_VERSION = 4;
 const rpcStats = new Map<string, { successes: number; failures: number; timeouts: number; totalLatencyMs: number }>();
 let rpcRequestTail = Promise.resolve();
 let knownServiceIds = new Set<string>();
+
+async function maybeRefreshStakingSnapshot(force = false): Promise<void> {
+  if (!force && Date.now() - lastStakingRefreshAt < STAKING_REFRESH_INTERVAL_MS) return;
+  let observedShares: ObservedClientShares | undefined;
+  try {
+    observedShares = await fetchObservedClientShares();
+    logInfo("Observed PocketDex client shares refreshed", { providerCount: Object.keys(observedShares).length });
+  } catch (error) {
+    // The staking refresh still runs for reward data. When PocketDex is down,
+    // staking-plans retains the last observed client-share values from SQLite.
+    logWarn("PocketDex client-share refresh failed; retaining observed LKG", { error: error instanceof Error ? error.message : String(error) });
+  }
+  try {
+    await refreshStakingSnapshot(observedShares);
+    lastStakingRefreshAt = Date.now();
+  } catch (error) {
+    logError("Staking snapshot refresh failed", error);
+  }
+}
 
 function hydrateKnownServiceRegistry(): void {
   const persistedServiceIds = getIndexedServiceIds();
@@ -780,6 +825,66 @@ async function fetchIndexerGraphqlEligibleSupplierCounts(knownIds: ReadonlySet<s
   throw new Error("data.pocket.network supplier service config pagination exceeded limit");
 }
 
+function jsonArray(value: unknown): unknown[] {
+  if (Array.isArray(value)) return value;
+  if (typeof value !== "string") return [];
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function supplierConfigDomain(node: { domains?: unknown; endpoints?: unknown }): string | null {
+  const declaredDomains = jsonArray(node.domains).flatMap((value) => typeof value === "string" ? [value] : []);
+  const endpointUrls = jsonArray(node.endpoints).flatMap((value) => {
+    if (typeof value !== "object" || value === null) return [];
+    const url = (value as { url?: unknown }).url;
+    return typeof url === "string" ? [url] : [];
+  });
+  const candidates = [...declaredDomains, ...endpointUrls];
+  const normalized = candidates.flatMap((candidate) => {
+    const hostname = getHostname(candidate.includes("://") ? candidate : `https://${candidate}`);
+    return hostname ? [getRegistrableDomain(hostname)] : [];
+  });
+  const knownProviderDomain = normalized.find((domain) => STAKING_PROVIDER_DOMAINS.has(domain));
+  if (knownProviderDomain) return knownProviderDomain;
+  return normalized[0] ?? null;
+}
+
+async function fetchObservedClientShares(): Promise<ObservedClientShares> {
+  const inputs: ObservedClientShareInput[] = [];
+  let after: string | null = null;
+  for (let page = 0; page < 20; page += 1) {
+    const response: PoktscanObservedSupplierConfigsResponse = await fetchJson<PoktscanObservedSupplierConfigsResponse>(POKTSCAN_URL, ELIGIBLE_SUPPLIER_TIMEOUT_MS, {
+      method: "POST",
+      headers: { accept: "application/json", "content-type": "application/json" },
+      body: JSON.stringify({ query: OBSERVED_SUPPLIER_CONFIGS_QUERY, variables: { after } })
+    });
+    const connection: NonNullable<PoktscanObservedSupplierConfigsResponse["data"]>["supplierServiceConfigs"] = response.data?.supplierServiceConfigs;
+    if (!connection) throw new Error("data.pocket.network returned no supplier service config connection");
+    for (const node of connection.nodes ?? []) {
+      if (!node?.serviceId || !node.supplier?.ownerId) continue;
+      const providerDomain = supplierConfigDomain(node);
+      if (!providerDomain) continue;
+      inputs.push({
+        providerDomain,
+        serviceId: node.serviceId,
+        supplierOwnerAddress: node.supplier.ownerId,
+        active: (node.supplier.stakeStatus ?? "").toLowerCase() === "staked",
+        revShare: node.revShare
+      });
+    }
+    if (connection.pageInfo?.hasNextPage !== true) {
+      return deriveObservedClientShares(inputs, new Date().toISOString());
+    }
+    after = connection.pageInfo.endCursor ?? null;
+    if (!after) throw new Error("data.pocket.network observed supplier pagination did not complete");
+  }
+  throw new Error("data.pocket.network observed supplier pagination exceeded limit");
+}
+
 async function syncEligibleSupplierCounts(): Promise<{ snapshot: EligibleSupplierCountsSnapshot | null; stale: boolean }> {
   const cached = readEligibleSupplierSnapshot();
   const diagnosticRaw = getIndexerState("eligible_supplier_diagnostics");
@@ -1116,6 +1221,8 @@ export async function rebuildIndexerCaches(): Promise<void> {
   const jobId = startJobRun("indexer_cache_rebuild");
 
   try {
+    await maybeRefreshStakingSnapshot();
+
     const latestHeight = Number(getIndexerState("contiguous_processed_height") ?? 0);
     const latestSeenHeight = Number(getIndexerState("highest_seen_height") ?? latestHeight);
     const latestFact = getLatestIndexedFact();
@@ -1422,6 +1529,8 @@ async function runRepairLoop(): Promise<void> {
     } catch (error) {
       logError("Repair loop failed", error);
     }
+
+    await maybeRefreshStakingSnapshot();
 
     if (graphQLCycleCounter % GRAPHQL_REPAIR_INTERVAL === 0) {
       try {
@@ -1747,6 +1856,8 @@ async function runLiveStartupTasks(): Promise<void> {
     logError("Session data sync failed during live startup", error);
   }
 
+  await maybeRefreshStakingSnapshot(true);
+
   try {
     await runLiveCatchup(500);
     pruneIndexerData(RETENTION_DAYS);
@@ -1901,6 +2012,10 @@ export async function runIndexer(options: IndexerOptions = {}): Promise<void> {
     await runDataMigration();
 
     if (liveFirst) {
+      const stakingSchema = ensureStakingSnapshotV3();
+      if (stakingSchema === "migrated") {
+        logInfo("Materialized Staking snapshot schema v3 from local legacy snapshot");
+      }
       void runLiveStartupTasks().catch((error) => logError("Live startup background tasks failed", error));
       finishJobRun(jobId, "success", startedAt, { durationMs: Date.now() - startedAt, liveFirst: true });
       await Promise.all([runLive(), runRepairLoop()]);

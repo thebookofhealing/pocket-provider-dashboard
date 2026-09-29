@@ -48,7 +48,7 @@ import {
 import { DEFAULT_RPC_URLS } from "@/lib/rpc-status";
 import { aggregateEligibleSupplierCounts, parseEligibleSupplierSnapshot, type EligibleSupplierPage, type EligibleSupplierSnapshot } from "@/lib/eligible-suppliers";
 import { resolveEligibleSupplierCounts, type EligibleSupplierCountsSnapshot } from "@/lib/eligible-supplier-source";
-import { ELIGIBLE_SUPPLIER_SNAPSHOT_SCHEMA_VERSION, DASHBOARD_CACHE_SCHEMA_VERSION } from "@/lib/cache-contract";
+import { ELIGIBLE_SUPPLIER_SNAPSHOT_SCHEMA_VERSION, DASHBOARD_CACHE_SCHEMA_VERSION, hasStructurallyServableDashboard } from "@/lib/cache-contract";
 import { deriveObservedClientShares, ensureStakingSnapshotV3, refreshStakingSnapshot, type ObservedClientShareInput, type ObservedClientShares } from "@/lib/staking-plans";
 
 type RpcEvent = {
@@ -1221,8 +1221,6 @@ export async function rebuildIndexerCaches(): Promise<void> {
   const jobId = startJobRun("indexer_cache_rebuild");
 
   try {
-    await maybeRefreshStakingSnapshot();
-
     const latestHeight = Number(getIndexerState("contiguous_processed_height") ?? 0);
     const latestSeenHeight = Number(getIndexerState("highest_seen_height") ?? latestHeight);
     const latestFact = getLatestIndexedFact();
@@ -1321,6 +1319,14 @@ export async function rebuildIndexerCaches(): Promise<void> {
         services
       };
       const payloadJson = JSON.stringify(payload);
+      if (!hasStructurallyServableDashboard(payload)) {
+        logWarn("Skipping invalid dashboard materialization; preserving persisted last-known-good snapshot", {
+          window,
+          serviceCount: payload.services.length,
+          eligibleSupplierSnapshotStale: payload.eligibleSupplierSnapshotStale
+        });
+        continue;
+      }
       if (cacheChanged(window, payloadJson)) {
         setDashboardCache(window, payloadJson);
       }
@@ -1856,14 +1862,16 @@ async function runLiveStartupTasks(): Promise<void> {
     logError("Session data sync failed during live startup", error);
   }
 
-  await maybeRefreshStakingSnapshot(true);
-
   try {
     await runLiveCatchup(500);
     pruneIndexerData(RETENTION_DAYS);
   } catch (error) {
     logError("Initial live catchup failed", error);
   }
+
+  // Materialize the dashboard before the independent Staking refresh so a
+  // slow PocketDex/Sauron response cannot delay recovery of Overview/Chains.
+  await maybeRefreshStakingSnapshot(true);
 }
 
 function subscribeToNewBlocks(ws: WebSocket): void {

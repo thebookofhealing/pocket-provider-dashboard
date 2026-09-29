@@ -21,8 +21,9 @@ fetch_with_retry() {
 
 fetch_with_retry "$LOCAL_BASE_URL/api/dashboard?window=30d" "$TMP_DIR/dashboard.json"
 fetch_with_retry "$LOCAL_BASE_URL/staking" "$TMP_DIR/staking.html"
-# Fetch health last: Staking only reads the already-persisted local snapshot,
-# so health is an independent post-deploy check rather than a refresh trigger.
+# Fetch health last: Staking and dashboard endpoints only read already-persisted
+# local snapshots, so health is an independent post-deploy check rather than a
+# refresh trigger.
 fetch_with_retry "$LOCAL_BASE_URL/api/health" "$TMP_DIR/health.json"
 
 EXPECTED_SHA="$EXPECTED_SHA" python3 - "$TMP_DIR/health.json" "$TMP_DIR/dashboard.json" "$TMP_DIR/staking.html" <<'PY'
@@ -48,16 +49,17 @@ assert materialized.get("schemaVersion") == 2, "dashboard materialization schema
 assert materialized.get("eligibleSnapshotSchemaVersion") == 2 and materialized.get("eligibleSnapshotComplete") is True, "dashboard eligible snapshot metadata is invalid"
 assert materialized.get("eligibleSnapshotSource") in ("indexer", "rest", "poktscan-graphql", "persisted-lkg"), "dashboard eligible snapshot source is missing"
 assert materialized.get("serviceCount", 0) > 0 and materialized.get("eligibleCount") == materialized.get("serviceCount"), "dashboard services do not all contain eligible counts"
-assert materialized.get("staleCount") == 0, "dashboard contains stale eligible counts"
+assert isinstance(materialized.get("staleCount"), int) and materialized.get("staleCount") >= 0, "dashboard stale-count diagnostic is invalid"
 assert indexer.get("isLocked") is True, "indexer lock is not held"
 
 services = dashboard.get("services") or []
 assert services, "30d dashboard has no services"
 for service in services:
     assert isinstance(service.get("eligibleSupplierCount"), (int, float)), f"eligible count missing for {service.get('serviceId')}"
-    assert service.get("eligibleSupplierCountStale") is False, f"eligible count stale for {service.get('serviceId')}"
+    assert isinstance(service.get("eligibleSupplierCountFetchedAt"), str) and service.get("eligibleSupplierCountFetchedAt"), f"eligible count timestamp missing for {service.get('serviceId')}"
+    assert isinstance(service.get("eligibleSupplierCountStale"), bool), f"eligible count freshness flag missing for {service.get('serviceId')}"
 top5 = materialized.get("top5") or []
-assert top5 and all(isinstance(item.get("eligibleSupplierCount"), (int, float)) and item.get("eligibleSupplierCountStale") is False for item in top5), "dashboard top-five diagnostics are incomplete"
+assert top5 and all(isinstance(item.get("eligibleSupplierCount"), (int, float)) and isinstance(item.get("eligibleSupplierCountStale"), bool) for item in top5), "dashboard top-five diagnostics are incomplete"
 
 providers = staking_diag.get("providers") or []
 assert staking_diag.get("snapshotSchemaVersion") == 3 and staking_diag.get("persisted") is True, "staking snapshot is not durable schema v3 data"

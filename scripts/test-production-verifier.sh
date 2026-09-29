@@ -22,6 +22,44 @@ bash -n "$script"
 grep -q 'snapshotSchemaVersion") == 3' "$script"
 grep -q 'clientShareSource' "$script"
 bash "$(cd "$(dirname "$script")" && pwd)/test-staking-readiness.sh"
+bash "$(cd "$(dirname "$script")" && pwd)/test-dashboard-readiness.sh"
+
+deploy_script="$(cd "$(dirname "$script")" && pwd)/deploy-production.sh"
+grep -q "dashboard_readiness.py" "$deploy_script"
+grep -q "dashboard_status.*200" "$deploy_script"
+grep -q "api/dashboard?window=30d" "$deploy_script"
+python3 - "$deploy_script" <<'PY'
+import sys
+from pathlib import Path
+
+source = Path(sys.argv[1]).read_text(encoding="utf-8")
+start = source.index("log \"verifying web")
+end = source.index("pm2 save", start)
+readiness = source[start:end]
+assert "dashboard_readiness.py" in readiness, "deploy readiness must validate dashboard contract"
+assert "dashboard_status" in readiness and '== "200"' in readiness, "deploy readiness must require HTTP 200, not merely curl success"
+assert "staking_readiness.py" in readiness, "deploy readiness must retain Staking v3 gate"
+print("deployment readiness contract checks passed")
+PY
+
+indexer_script="$(cd "$(dirname "$script")/.." && pwd)/lib/indexer.ts"
+python3 - "$indexer_script" <<'PY'
+import sys
+from pathlib import Path
+
+source = Path(sys.argv[1]).read_text(encoding="utf-8")
+rebuild_start = source.index("export async function rebuildIndexerCaches")
+rebuild_end = source.index("async function maybeRebuildCaches", rebuild_start)
+rebuild = source[rebuild_start:rebuild_end]
+assert "maybeRefreshStakingSnapshot" not in rebuild, "dashboard cache rebuild must not await Staking refresh"
+startup_start = source.index("async function runLiveStartupTasks")
+startup_end = source.index("function subscribeToNewBlocks", startup_start)
+assert "maybeRefreshStakingSnapshot(true)" in source[startup_start:startup_end], "startup must refresh Staking independently"
+repair_start = source.index("async function runRepairLoop")
+repair_end = source.index("async function runLiveStartupTasks", repair_start)
+assert "maybeRefreshStakingSnapshot()" in source[repair_start:repair_end], "repair loop must refresh Staking independently"
+print("Staking/dashboard refresh decoupling checks passed")
+PY
 
 staking_page="$(cd "$(dirname "$script")/.." && pwd)/app/staking/page.tsx"
 if grep -Eq 'fetchLivePlans|fetch\(' "$staking_page"; then

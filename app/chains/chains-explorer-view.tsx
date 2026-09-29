@@ -340,6 +340,8 @@ export default function ChainsExplorerView({ data }: ChainsExplorerViewProps) {
             <tbody>
               {visibleServices.map((service) => {
                 const opportunity = buildAllocatedServiceOpportunity(service, DEFAULT_NEW_PROVIDER_SUPPLIERS, DEFAULT_NEW_PROVIDER_SUPPLIERS, { sessionSlots: data.suppliersPerSession, appsStaked: service.appsStaked });
+                const demandSignalStale = service.eligibleSupplierCountStale === true;
+                const demandSignalStaleTooltip = "Data is stale. This Demand Signal uses the latest available supplier snapshot and may update after the next refresh.";
 
                 return (
                 <tr key={service.serviceId}>
@@ -359,8 +361,16 @@ export default function ChainsExplorerView({ data }: ChainsExplorerViewProps) {
                   <td className="right">{formatInteger(service.appsStaked ?? 0)}</td>
                   <td className="right" style={{ color: 'var(--green)', fontWeight: 600 }}>{formatDecimal(revenuePerProvider(service), 1)} POKT</td>
                   <td className="right">
-                    <span className={`pill ${opportunity.opportunityScore >= 7 ? 'density-low' : opportunity.opportunityScore >= 4 ? 'density-medium' : 'density-high'}`} style={{ fontSize: '0.7rem' }}>
-                      {formatDecimal(opportunity.opportunityScore, 1)} score
+                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
+                      <span className={`pill ${opportunity.opportunityScore >= 7 ? 'density-low' : opportunity.opportunityScore >= 4 ? 'density-medium' : 'density-high'}`} style={{ fontSize: '0.7rem' }}>
+                        {formatDecimal(opportunity.opportunityScore, 1)} score
+                      </span>
+                      {demandSignalStale && (
+                        <span className="info-tooltip">
+                          <span className="info-tooltip-trigger" tabIndex={0} aria-label={demandSignalStaleTooltip}>i</span>
+                          <span className="info-tooltip-content" role="tooltip">{demandSignalStaleTooltip}</span>
+                        </span>
+                      )}
                     </span>
                     {service.appsStaked != null && service.appsStaked > 0 && (
                       <div className="muted" style={{ fontSize: '0.7rem', marginTop: '4px' }}>

@@ -20,7 +20,7 @@ import type {
 } from "@/lib/types";
 import { isEligibleSupplierSnapshotReusable, parseEligibleSupplierSnapshot, type EligibleSupplierSnapshot } from "@/lib/eligible-suppliers";
 import { resolveEligibleSupplierCounts, type EligibleSupplierCountsSnapshot } from "@/lib/eligible-supplier-source";
-import { DASHBOARD_CACHE_SCHEMA_VERSION, ELIGIBLE_SUPPLIER_SNAPSHOT_SCHEMA_VERSION, hasCompleteEligibleSupplierCounts } from "@/lib/cache-contract";
+import { DASHBOARD_CACHE_SCHEMA_VERSION, ELIGIBLE_SUPPLIER_SNAPSHOT_SCHEMA_VERSION, hasStructurallyServableDashboard } from "@/lib/cache-contract";
 
 type RpcEvent = {
   type: string;
@@ -1259,8 +1259,7 @@ function setCachedPoktscanSupplierDirectory(directory: SupplierDirectory): void 
 }
 
 function hasCompatibleDashboardCache(data: DashboardData | null | undefined): data is DashboardData {
-  if (!data || data.dashboardSchemaVersion !== DASHBOARD_CACHE_SCHEMA_VERSION || data.eligibleSupplierSnapshotSchemaVersion !== ELIGIBLE_SUPPLIER_SNAPSHOT_SCHEMA_VERSION || data.eligibleSupplierSnapshotComplete !== true || typeof data.eligibleSupplierSnapshotFetchedAt !== "string" || typeof data.eligibleSupplierSnapshotStale !== "boolean" || typeof data.eligibleSupplierSnapshotSource !== "string" || data.services.length === 0) return false;
-  return hasCompleteEligibleSupplierCounts(data.services);
+  return Boolean(data && hasStructurallyServableDashboard(data));
 }
 
 function hasCompatibleSerializedDashboardCache(data: SerializedDashboardCache): boolean {
@@ -1296,6 +1295,9 @@ function hydrateDashboardCache(window: TimeWindow): DashboardData | null {
 }
 
 function persistDashboard(window: TimeWindow, data: DashboardData): DashboardData {
+  if (!hasStructurallyServableDashboard(data)) {
+    throw new Error(`refusing to persist structurally invalid dashboard for ${window}`);
+  }
   dashboardCache.set(window, {
     expiresAt: Date.now() + UI_MEMORY_CACHE_TTL_MS,
     data
@@ -2755,6 +2757,10 @@ export function getDashboardDataSafe(window: TimeWindow): { data: DashboardData 
   logDataWarning("Dashboard snapshot missing; waiting for ingestion worker", { window });
   return { data: null, status: "warming" };
 }
+
+export const __testing = {
+  persistDashboard
+};
 
 export function primeDashboardRefresh(window: TimeWindow): void {
   logDataInfo("Skipping request-path dashboard refresh; ingestion worker owns data updates", { window });

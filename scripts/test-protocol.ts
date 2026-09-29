@@ -13,8 +13,9 @@ import { aggregateEligibleSupplierCounts } from "@/lib/eligible-suppliers";
 import { getDeployedSha } from "@/lib/deployment";
 import { resolveEligibleSupplierCounts } from "@/lib/eligible-supplier-source";
 import { buildStakingProjection, getSelectableStakingPlans } from "@/app/staking/staking-dashboard";
-import { ELIGIBLE_SUPPLIER_SNAPSHOT_SCHEMA_VERSION, hasCompleteEligibleSupplierCounts } from "@/lib/cache-contract";
-import { closeDatabaseForTests, getMeta, setMeta } from "@/lib/db";
+import { __testing as dashboardTesting, getDashboardDataSafe } from "@/lib/pocket";
+import { ELIGIBLE_SUPPLIER_SNAPSHOT_SCHEMA_VERSION, hasCompleteEligibleSupplierCounts, hasStructurallyCompleteEligibleSupplierCounts, hasStructurallyServableDashboard } from "@/lib/cache-contract";
+import { closeDatabaseForTests, getDashboardCache, getMeta, setDashboardCache, setMeta } from "@/lib/db";
 
 assert.equal(getSelectionProbability(40, 1), 100, "all eligible suppliers fit within session slots");
 assert.equal(getSelectionProbability(100, 0), 0, "no entering suppliers has no selection probability");
@@ -113,6 +114,69 @@ assert.deepEqual(selectEligibleSupplierSnapshot(eligibleSnapshot, null, fresh, n
 assert.deepEqual(selectEligibleSupplierSnapshot(eligibleSnapshot, { ...completeEligibleSnapshot, counts: { base: 13, eth: 0 }, fetchedAt: "2026-09-22T12:00:00.000Z" }, fresh), { snapshot: { ...completeEligibleSnapshot, counts: { base: 13, eth: 0 }, fetchedAt: "2026-09-22T12:00:00.000Z" }, stale: false });
 assert.equal(hasCompleteEligibleSupplierCounts([{ eligibleSupplierCount: 0, eligibleSupplierCountFetchedAt: "2026-09-22T12:00:00.000Z", eligibleSupplierCountStale: false }]), true, "zero counts satisfy the shared readiness predicate");
 assert.equal(hasCompleteEligibleSupplierCounts([{ eligibleSupplierCount: 1, eligibleSupplierCountFetchedAt: "2026-09-22T12:00:00.000Z", eligibleSupplierCountStale: true }]), false, "stale counts fail the shared readiness predicate");
+assert.equal(hasStructurallyCompleteEligibleSupplierCounts([{ eligibleSupplierCount: 1, eligibleSupplierCountFetchedAt: "2026-09-22T12:00:00.000Z", eligibleSupplierCountStale: true }]), true, "stale counts remain structurally servable for dashboard pages");
+
+setDashboardCache("30d", JSON.stringify({
+  dashboardSchemaVersion: 2,
+  eligibleSupplierSnapshotSchemaVersion: 2,
+  eligibleSupplierSnapshotComplete: true,
+  eligibleSupplierSnapshotFetchedAt: "2026-09-22T12:00:00.000Z",
+  eligibleSupplierSnapshotStale: true,
+  eligibleSupplierSnapshotSource: "persisted-lkg",
+  window: "30d",
+  generatedAt: "2026-09-22T12:00:00.000Z",
+  dataSource: "rpc",
+  poktPriceUsd: 0,
+  latestHeight: 1,
+  indexerProcessedHeight: 1,
+  indexerTargetHeight: 1,
+  scannedHeights: 1,
+  scannedSettlementHeights: 1,
+  settlementEvents: 1,
+  earliestSettlementTime: null,
+  latestSettlementTime: null,
+  totalRelays: 1,
+  totalEstimatedRelays: 1,
+  totalEstimatedComputeUnits: 0,
+  relayCoverage: 1,
+  totalRevenueUpokt: "0",
+  activeProviders: 1,
+  activeChains: 1,
+  suppliersPerSession: 50,
+  appsStakedByService: {},
+  sessionObservedHeight: 1,
+  sessionFetchedAt: "2026-09-22T12:00:00.000Z",
+  sessionStale: true,
+  providers: [],
+  services: [{
+    serviceId: "eth",
+    serviceName: "Ethereum",
+    relays: 1,
+    revenueUpokt: "0",
+    providerCount: 1,
+    eligibleSupplierCount: 1,
+    eligibleSupplierCountFetchedAt: "2026-09-22T12:00:00.000Z",
+    eligibleSupplierCountStale: true
+  }]
+}));
+const staleDashboardPayload = {
+  dashboardSchemaVersion: 2,
+  eligibleSupplierSnapshotSchemaVersion: 2,
+  eligibleSupplierSnapshotComplete: true,
+  eligibleSupplierSnapshotFetchedAt: "2026-09-22T12:00:00.000Z",
+  eligibleSupplierSnapshotStale: true,
+  eligibleSupplierSnapshotSource: "persisted-lkg",
+  services: [{ eligibleSupplierCount: 1, eligibleSupplierCountFetchedAt: "2026-09-22T12:00:00.000Z", eligibleSupplierCountStale: true }]
+};
+assert.equal(hasStructurallyServableDashboard(staleDashboardPayload), true, "stale LKG dashboard is structurally servable");
+const staleDashboard = getDashboardDataSafe("30d");
+assert.equal(staleDashboard.status, "ready", "complete stale dashboard LKG remains visible");
+assert.equal(staleDashboard.data?.services[0]?.eligibleSupplierCountStale, true, "dashboard preserves truthful eligible-count staleness");
+assert.equal(hasCompleteEligibleSupplierCounts(staleDashboard.data?.services ?? []), false, "calculator projections remain unavailable while counts are stale");
+const persistedBeforeInvalidWrite = getDashboardCache("30d")?.payloadJson;
+assert.ok(persistedBeforeInvalidWrite, "stale dashboard LKG is persisted before invalid rebuild attempt");
+assert.throws(() => dashboardTesting.persistDashboard("30d", { ...staleDashboard.data!, services: [] }), /refusing to persist structurally invalid dashboard/, "empty materialization is rejected before persistence");
+assert.equal(getDashboardCache("30d")?.payloadJson, persistedBeforeInvalidWrite, "invalid materialization cannot overwrite the persisted dashboard LKG");
 
 const snapshotSource = {
   sourceUpdatedAt: "2026-09-22T11:55:00.000Z",

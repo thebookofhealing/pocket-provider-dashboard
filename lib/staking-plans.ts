@@ -1,5 +1,6 @@
 import { derivePlanEconomics, isSourceFresh, normalizeSourceTimestamp } from "@/lib/staking-economics";
 import { getMeta, isDatabaseReadOnly, setMeta } from "@/lib/db";
+import { normalizeProviderDomain, resolveStakingProviderIdentity, STAKING_PROVIDER_IDENTITIES } from "@/lib/staking-provider-identity";
 
 export const DEFAULT_POKT_PER_SUPPLIER = 59_500;
 export const MINIMUM_DISPLAY_APR = 10;
@@ -32,11 +33,15 @@ export type ObservedClientShare = {
   uniformValue: number | null;
   source: ObservedClientShareSource;
   observedAt: string | null;
+  activeConfigCount?: number;
+  ownerRevShareMatchCount?: number;
   byService?: Record<string, number[]>;
 };
 
 export type ObservedClientShareInput = {
   providerDomain: string;
+  providerOverride?: string | null;
+  providerName?: string | null;
   serviceId: string;
   supplierOwnerAddress: string | null;
   active: boolean;
@@ -57,6 +62,8 @@ export type PublicPlan = {
   displayedYieldMax?: number;
   termsVerifiedAt: string;
   website?: string;
+  /** Exact reward-domain alias selected after individual candidate probes. */
+  rewardDomain?: string;
   rewardStatus: RewardStatus;
   valueSource: PlanValueSource;
   sourceUpdatedAt: string | null;
@@ -78,12 +85,14 @@ export type StakingPlansSnapshot = {
 
 type ProviderPlanMetadata = {
   id: string;
+  identityId?: string;
   provider: string;
   plan: string;
   clientShare: number;
   termsVerifiedAt: string;
   website?: string;
   domain: string;
+  rewardDomainCandidates?: string[];
   clientSharesByService?: Record<string, number>;
 };
 type IgniterRewardService = {
@@ -97,6 +106,8 @@ type IgniterSource = {
 };
 type IgniterLatestBlock = { blocks?: { nodes?: Array<{ id?: string | number; timestamp?: string | number | null }> } };
 type IgniterAllocation = { allocation?: { value?: string | null } | null };
+type RewardEntry = { services: IgniterRewardService[]; error?: string; sourceDomain?: string };
+export type RewardDomainProbe = { domain: string; services: IgniterRewardService[]; error?: string };
 
 class StakingRefreshError extends Error {
   constructor(readonly stage: "source" | "rewards" | "minimum-stake" | "derive", cause: unknown) {
@@ -108,20 +119,36 @@ class StakingRefreshError extends Error {
 // Igniter's public UI does not expose an unauthenticated plan-status endpoint.
 // Keep plan terms explicit, but source reward economics and the protocol minimum
 // stake from the same public Pocket services used by Igniter.
-const PLAN_METADATA: ProviderPlanMetadata[] = [
-  { id: "kleomedes-public", provider: "Kleomedes", plan: "Public", clientShare: 49, termsVerifiedAt: "2026-09-22", domain: "kleomedes.cloud", website: "https://kleomedes.cloud" },
-  { id: "kalorius-public", provider: "Kalorius.tech", plan: "public staking", clientShare: 20, termsVerifiedAt: "2026-09-22", domain: "kalorius.tech", website: "https://kalorius.tech/" },
-  { id: "nodefleet-public", provider: "Nodefleet", plan: "Nodefleet-Public", clientShare: 75, termsVerifiedAt: "2026-09-22", domain: "nodefleet.net", website: "https://nodefleet.org/" },
-  { id: "purroofgroup-public", provider: "purroofgroup", plan: "sv1-default", clientShare: 78, termsVerifiedAt: "2026-09-22", domain: "purroofgroup.com", website: "https://www.purroofgroup.com/" },
-  { id: "easy2stake-public", provider: "Easy2stake", plan: "igniter-1-eu-a", clientShare: 50, termsVerifiedAt: "2026-09-22", domain: "easy2stake.com", website: "https://www.easy2stake.com/" }
-];
+const PLAN_TERMS: Record<string, { plan: string; clientShare: number; termsVerifiedAt: string; website: string }> = {
+  kleomedes: { plan: "Public", clientShare: 49, termsVerifiedAt: "2026-09-22", website: "https://kleomedes.cloud" },
+  kalorius: { plan: "public staking", clientShare: 20, termsVerifiedAt: "2026-09-22", website: "https://kalorius.tech/" },
+  nodefleet: { plan: "Nodefleet-Public", clientShare: 75, termsVerifiedAt: "2026-09-22", website: "https://nodefleet.org/" },
+  purroofgroup: { plan: "sv1-default", clientShare: 78, termsVerifiedAt: "2026-09-22", website: "https://www.purroofgroup.com/" },
+  easy2stake: { plan: "igniter-1-eu-a", clientShare: 50, termsVerifiedAt: "2026-09-22", website: "https://www.easy2stake.com/" }
+};
+
+const PLAN_METADATA: ProviderPlanMetadata[] = STAKING_PROVIDER_IDENTITIES.map((identity) => {
+  const terms = PLAN_TERMS[identity.id];
+  if (!terms) throw new Error(`Missing Staking terms for provider identity ${identity.id}`);
+  return {
+    id: `${identity.id}-public`,
+    identityId: identity.id,
+    provider: identity.provider,
+    plan: terms.plan,
+    clientShare: terms.clientShare,
+    termsVerifiedAt: terms.termsVerifiedAt,
+    domain: identity.domainAliases[0]!,
+    rewardDomainCandidates: identity.rewardDomainCandidates,
+    website: terms.website
+  };
+});
 
 function configuredClientShareObservation(clientShare: number, observedAt: string | null): ObservedClientShare {
-  return { status: "uniform", min: clientShare, max: clientShare, uniformValue: clientShare, source: "configured-fallback", observedAt };
+  return { status: "uniform", min: clientShare, max: clientShare, uniformValue: clientShare, source: "configured-fallback", observedAt, activeConfigCount: 0, ownerRevShareMatchCount: 0 };
 }
 
 function unavailableClientShareObservation(observedAt: string | null): ObservedClientShare {
-  return { status: "unavailable", min: null, max: null, uniformValue: null, source: "pocketdex-onchain", observedAt };
+  return { status: "unavailable", min: null, max: null, uniformValue: null, source: "pocketdex-onchain", observedAt, activeConfigCount: 0, ownerRevShareMatchCount: 0 };
 }
 
 function parseRevShareEntries(value: unknown): Array<{ address: string; percentage: number }> {
@@ -139,38 +166,56 @@ function parseRevShareEntries(value: unknown): Array<{ address: string; percenta
 /** Aggregates active PocketDex supplier configs by provider domain. */
 export function deriveObservedClientShares(inputs: ObservedClientShareInput[], observedAt: string | null): ObservedClientShares {
   const byProvider = new Map<string, Map<string, number[]>>();
+  const providerCounts = new Map<string, { activeConfigCount: number; ownerRevShareMatchCount: number }>();
   for (const input of inputs) {
     if (!input.active || !input.providerDomain || !input.supplierOwnerAddress) continue;
+    const identity = resolveStakingProviderIdentity({
+      providerOverride: input.providerOverride,
+      providerName: input.providerName,
+      domain: input.providerDomain
+    });
+    // Unknown domains are retained under their normalized exact domain for
+    // diagnostics and fixture compatibility, but never guessed into a known
+    // provider identity.
+    const providerKey = identity?.id ?? normalizeProviderDomain(input.providerDomain) ?? input.providerDomain;
+    const counts = providerCounts.get(providerKey) ?? { activeConfigCount: 0, ownerRevShareMatchCount: 0 };
+    counts.activeConfigCount += 1;
+    providerCounts.set(providerKey, counts);
+    const services = byProvider.get(providerKey) ?? new Map<string, number[]>();
+    byProvider.set(providerKey, services);
     const owner = input.supplierOwnerAddress.toLowerCase();
     const ownerShare = parseRevShareEntries(input.revShare).find((entry) => entry.address === owner)?.percentage;
     if (ownerShare == null) continue;
-    const services = byProvider.get(input.providerDomain) ?? new Map<string, number[]>();
+    counts.ownerRevShareMatchCount += 1;
     const values = services.get(input.serviceId) ?? [];
     values.push(ownerShare);
     services.set(input.serviceId, values);
-    byProvider.set(input.providerDomain, services);
   }
 
   return Object.fromEntries(Array.from(byProvider.entries()).map(([domain, services]) => {
     const byService = Object.fromEntries(Array.from(services.entries()).map(([serviceId, values]) => [serviceId, values]));
     const allValues = Object.values(byService).flat();
-    const min = Math.min(...allValues);
-    const max = Math.max(...allValues);
-    const uniform = max - min <= 0.05;
+    const min = allValues.length > 0 ? Math.min(...allValues) : null;
+    const max = allValues.length > 0 ? Math.max(...allValues) : null;
+    const uniform = min != null && max != null && max - min <= 0.05;
     return [domain, {
-      status: uniform ? "uniform" : "variable",
+      status: allValues.length === 0 ? "unavailable" : uniform ? "uniform" : "variable",
       min,
       max,
-      uniformValue: uniform ? allValues[0] : null,
+      uniformValue: uniform ? allValues[0] ?? null : null,
       source: "pocketdex-onchain",
       observedAt,
+      activeConfigCount: providerCounts.get(domain)?.activeConfigCount ?? 0,
+      ownerRevShareMatchCount: providerCounts.get(domain)?.ownerRevShareMatchCount ?? 0,
       byService
     } satisfies ObservedClientShare];
   }));
 }
 
 function observationForPlan(metadata: ProviderPlanMetadata, observedShares: ObservedClientShares | undefined, previous?: ObservedClientShare): ObservedClientShare {
-  if (observedShares !== undefined) return observedShares[metadata.domain] ?? unavailableClientShareObservation(null);
+  if (observedShares !== undefined) {
+    return observedShares[metadata.identityId ?? metadata.domain] ?? observedShares[metadata.domain] ?? unavailableClientShareObservation(null);
+  }
   return previous ?? configuredClientShareObservation(metadata.clientShare, null);
 }
 
@@ -184,7 +229,7 @@ const LAST_KNOWN_GOOD = [
   { ...PLAN_METADATA[2], apr: 28.4, displayedYield: 46.64 },
   { ...PLAN_METADATA[3], apr: 18.8, displayedYield: 30.92 },
   { ...PLAN_METADATA[4], apr: 13.5, displayedYield: 22.19 }
-].map(({ domain: _domain, ...plan }) => ({
+].map(({ domain: _domain, identityId: _identityId, rewardDomainCandidates: _rewardDomainCandidates, ...plan }) => ({
   ...plan,
   clientShareObservation: configuredClientShareObservation(plan.clientShare, "2026-09-22T00:00:00.000Z"),
   rewardStatus: "unavailable" as const,
@@ -267,6 +312,8 @@ function parseClientShareObservation(value: unknown, fallbackShare: number, fall
     uniformValue: typeof observation.uniformValue === "number" ? observation.uniformValue : null,
     source: observation.source as ObservedClientShareSource,
     observedAt: observation.observedAt ?? null,
+    activeConfigCount: typeof observation.activeConfigCount === "number" ? observation.activeConfigCount : 0,
+    ownerRevShareMatchCount: typeof observation.ownerRevShareMatchCount === "number" ? observation.ownerRevShareMatchCount : 0,
     byService: observation.byService
   };
 }
@@ -390,6 +437,7 @@ export function getStakingDiagnostics(): {
     id: string;
     provider: string;
     domain: string | null;
+    rewardDomain: string | null;
     status: RewardStatus;
     valueSource: PlanValueSource;
     sourceUpdatedAt: string | null;
@@ -397,6 +445,8 @@ export function getStakingDiagnostics(): {
     clientShareStatus: ObservedClientShareStatus;
     clientShareSource: ObservedClientShareSource;
     clientShareObservedAt: string | null;
+    activeConfigCount: number;
+    ownerRevShareMatchCount: number;
     reason: string | null;
   }>;
 } {
@@ -417,6 +467,7 @@ export function getStakingDiagnostics(): {
       id: plan.id,
       provider: plan.provider,
       domain: getPlanDomain(plan.id),
+      rewardDomain: plan.rewardDomain ?? getPlanDomain(plan.id),
       status: plan.rewardStatus,
       valueSource: plan.valueSource,
       sourceUpdatedAt: plan.sourceUpdatedAt,
@@ -424,6 +475,8 @@ export function getStakingDiagnostics(): {
       clientShareStatus: plan.clientShareObservation.status,
       clientShareSource: plan.clientShareObservation.source,
       clientShareObservedAt: plan.clientShareObservation.observedAt,
+      activeConfigCount: plan.clientShareObservation.activeConfigCount ?? 0,
+      ownerRevShareMatchCount: plan.clientShareObservation.ownerRevShareMatchCount ?? 0,
       reason: plan.diagnosticReason ?? null
     }))
   };
@@ -489,6 +542,41 @@ function deriveClientShareEconomics(
   return configuredShare == null ? null : { clientShare: configuredShare, economics: derivePlanEconomics(grossSevenDayPerSupplierUpokt, configuredShare, minimumStake) };
 }
 
+/** Select exactly one verified reward-domain result; aliases are never summed. */
+export function chooseRewardDomainProbe(probes: RewardDomainProbe[]): RewardEntry {
+  const usable = probes.find((probe) => probe.services.some((service) => {
+    const gross = toNumber(service.gross_rewards);
+    const suppliers = toNumber(service.staked_suppliers);
+    return gross != null && gross >= 0 && suppliers != null && suppliers > 0;
+  }));
+  if (usable) return { services: usable.services, sourceDomain: usable.domain };
+  const errors = probes.filter((probe) => probe.error).map((probe) => `${probe.domain}: ${probe.error}`);
+  return { services: [], error: errors.join("; ") || "provider reward query returned no usable services" };
+}
+
+function aggregateGrossSevenDayPerSupplier(
+  services: IgniterRewardService[],
+  supplierAllocation: number
+): { grossSevenDayPerSupplierUpokt: number; invalidServiceCount: number } | null {
+  let grossSevenDayPerSupplierUpokt = 0;
+  let usableServiceCount = 0;
+  let invalidServiceCount = 0;
+  for (const service of services) {
+    const gross = toNumber(service.gross_rewards);
+    const suppliers = toNumber(service.staked_suppliers);
+    if (gross == null || gross < 0 || suppliers == null || suppliers <= 0) {
+      invalidServiceCount += 1;
+      continue;
+    }
+    // This mirrors Igniter's address-group workflow: supplier allocation is
+    // applied to gross rewards before dividing by the service's live supplier
+    // count, then the UI divides the seven-day total by seven.
+    grossSevenDayPerSupplierUpokt += Math.floor(gross * supplierAllocation) / suppliers;
+    usableServiceCount += 1;
+  }
+  return usableServiceCount > 0 ? { grossSevenDayPerSupplierUpokt, invalidServiceCount } : null;
+}
+
 async function fetchMinimumSupplierStake(): Promise<number> {
   const response = await fetch(`${POCKET_REST_URL}/pokt-network/poktroll/supplier/params`, { cache: "no-store", signal: AbortSignal.timeout(10_000) });
   if (!response.ok) throw new Error(`Pocket supplier params returned ${response.status}`);
@@ -520,23 +608,17 @@ export function buildLivePlans(
   }
 
   const plans = metadata.map((planMetadata): PublicPlan | null => {
-    const services = rewardsByDomain.get(planMetadata.domain);
+    const services = rewardsByDomain.get(planMetadata.identityId ?? planMetadata.domain) ?? rewardsByDomain.get(planMetadata.domain);
     if (!services || services.length === 0) return null;
-    let grossSevenDayPerSupplierUpokt = 0;
-    for (const service of services) {
-      const gross = toNumber(service.gross_rewards);
-      const suppliers = toNumber(service.staked_suppliers);
-      if (gross == null || suppliers == null || suppliers <= 0) return null;
-      // This mirrors Igniter's address-group workflow: supplier allocation is
-      // applied to gross rewards before dividing by the service's live
-      // supplier count, then the UI divides the seven-day total by seven.
-      grossSevenDayPerSupplierUpokt += Math.floor(gross * supplierAllocation) / suppliers;
-    }
+    const aggregate = aggregateGrossSevenDayPerSupplier(services, supplierAllocation);
+    if (!aggregate) return null;
+    const { grossSevenDayPerSupplierUpokt, invalidServiceCount } = aggregate;
     const observation = observationForPlan(planMetadata, observedShares);
     const derived = deriveClientShareEconomics(grossSevenDayPerSupplierUpokt, planMetadata, observation, minimumStake);
     if (!derived) return null;
     return {
       ...planMetadata,
+      rewardDomain: planMetadata.domain,
       clientShare: derived.clientShare,
       displayedYield: derived.economics.netDailyPokt,
       ...(derived.range ? { displayedYieldMin: derived.range.min.netDailyPokt, displayedYieldMax: derived.range.max.netDailyPokt, aprMin: derived.range.min.apr, aprMax: derived.range.max.apr } : {}),
@@ -545,7 +627,8 @@ export function buildLivePlans(
       valueSource: isSourceFresh(sourceUpdatedAt, now.getTime(), REFRESH_INTERVAL_MS) ? "live-derived" : "stale-derived",
       sourceUpdatedAt,
       fetchedAt: now.toISOString(),
-      clientShareObservation: observation
+      clientShareObservation: observation,
+      ...(invalidServiceCount > 0 ? { diagnosticReason: `ignored ${invalidServiceCount} invalid reward service row${invalidServiceCount === 1 ? "" : "s"}` } : {})
     };
   }).filter((plan): plan is PublicPlan => plan !== null)
     .filter((plan) => plan.apr > MINIMUM_DISPLAY_APR)
@@ -569,6 +652,7 @@ function parseSupplierAllocation(value: string | null | undefined): number | nul
 function unavailablePlan(metadata: ProviderPlanMetadata, now: Date, sourceUpdatedAt: string | null, reason: string): PublicPlan {
   return {
     ...metadata,
+    rewardDomain: metadata.domain,
     apr: 0,
     displayedYield: 0,
     rewardStatus: "unavailable",
@@ -591,18 +675,15 @@ function deriveProviderPlan(
   observedShares?: ObservedClientShares,
   previousObservation?: ObservedClientShare
 ): PublicPlan | null {
-  let grossSevenDayPerSupplierUpokt = 0;
-  for (const service of services) {
-    const gross = toNumber(service.gross_rewards);
-    const suppliers = toNumber(service.staked_suppliers);
-    if (gross == null || suppliers == null || suppliers <= 0) return null;
-    grossSevenDayPerSupplierUpokt += Math.floor(gross * supplierAllocation) / suppliers;
-  }
+  const aggregate = aggregateGrossSevenDayPerSupplier(services, supplierAllocation);
+  if (!aggregate) return null;
+  const { grossSevenDayPerSupplierUpokt, invalidServiceCount } = aggregate;
   const observation = observationForPlan(metadata, observedShares, previousObservation);
   const derived = deriveClientShareEconomics(grossSevenDayPerSupplierUpokt, metadata, observation, minimumStake);
   if (!derived) return null;
   return {
     ...metadata,
+    rewardDomain: metadata.domain,
     clientShare: derived.clientShare,
     displayedYield: derived.economics.netDailyPokt,
     ...(derived.range ? { displayedYieldMin: derived.range.min.netDailyPokt, displayedYieldMax: derived.range.max.netDailyPokt, aprMin: derived.range.min.apr, aprMax: derived.range.max.apr } : {}),
@@ -611,7 +692,8 @@ function deriveProviderPlan(
     valueSource: sourceFresh ? "live-derived" : "stale-derived",
     sourceUpdatedAt,
     fetchedAt: now.toISOString(),
-    clientShareObservation: observation
+    clientShareObservation: observation,
+    ...(invalidServiceCount > 0 ? { diagnosticReason: `ignored ${invalidServiceCount} invalid reward service row${invalidServiceCount === 1 ? "" : "s"}` } : {})
   };
 }
 
@@ -621,7 +703,7 @@ function buildPartialPlans(
   minimumStake: number | null,
   allocationStatus: "live" | "stale" | "unavailable",
   minimumStakeStatus: "live" | "stale" | "unavailable",
-  rewardEntries: Map<string, { services: IgniterRewardService[]; error?: string }>,
+  rewardEntries: Map<string, RewardEntry>,
   now: Date,
   metadata = PLAN_METADATA,
   observedShares?: ObservedClientShares
@@ -629,14 +711,15 @@ function buildPartialPlans(
   const sourceFresh = isSourceFresh(sourceUpdatedAt, now.getTime(), REFRESH_INTERVAL_MS);
   const supplierAllocation = parseSupplierAllocation(allocationValue);
   const plans = metadata.map((planMetadata): PublicPlan => {
-    const entry = rewardEntries.get(planMetadata.domain);
+    const entry = rewardEntries.get(planMetadata.identityId ?? planMetadata.domain) ?? rewardEntries.get(planMetadata.domain);
     const reason = entry?.error ?? (!entry || entry.services.length === 0 ? "provider reward query returned no usable services" : null);
     const livePlan = supplierAllocation != null && minimumStake != null && Boolean(sourceUpdatedAt) && !reason
       ? deriveProviderPlan(planMetadata, entry?.services ?? [], supplierAllocation, minimumStake, now, sourceUpdatedAt as string, sourceFresh, observedShares, lastProviderPlans.get(planMetadata.id)?.clientShareObservation)
       : null;
     if (livePlan) {
-      lastProviderPlans.set(planMetadata.id, livePlan);
-      return livePlan;
+      const sourcedPlan = { ...livePlan, rewardDomain: entry?.sourceDomain ?? planMetadata.domain };
+      lastProviderPlans.set(planMetadata.id, sourcedPlan);
+      return sourcedPlan;
     }
     const previous = lastProviderPlans.get(planMetadata.id);
     if (previous) {
@@ -648,7 +731,7 @@ function buildPartialPlans(
       };
     }
     const unavailable = unavailablePlan(planMetadata, now, sourceUpdatedAt, reason ?? "global staking input unavailable");
-    if (observedShares !== undefined) unavailable.clientShareObservation = observedShares[planMetadata.domain] ?? unavailableClientShareObservation(null);
+    if (observedShares !== undefined) unavailable.clientShareObservation = observedShares[planMetadata.identityId ?? planMetadata.domain] ?? observedShares[planMetadata.domain] ?? unavailableClientShareObservation(null);
     return unavailable;
   }).filter((plan): plan is PublicPlan => plan != null)
     .sort((a, b) => (b.aprMin ?? b.apr) - (a.aprMin ?? a.apr) || a.provider.localeCompare(b.provider));
@@ -698,17 +781,27 @@ async function fetchLivePlans(observedShares?: ObservedClientShares): Promise<St
   const anchor = sourceUpdatedAt ? new Date(sourceUpdatedAt) : now;
   const endTs = new Date(Date.UTC(anchor.getUTCFullYear(), anchor.getUTCMonth(), anchor.getUTCDate(), 23, 59, 59, 999));
   const startTs = new Date(Date.UTC(anchor.getUTCFullYear(), anchor.getUTCMonth(), anchor.getUTCDate() - 6, 0, 0, 0, 0));
-  const rewardResults: Array<readonly [string, { services: IgniterRewardService[]; error?: string }]> = [];
-  const settledRewards = await Promise.allSettled(PLAN_METADATA.map((metadata) => fetchGraphQL<{ rewards?: IgniterRewardPayload }>(IGNITER_REWARDS_QUERY, {
-    domains: [metadata.domain], startTs: startTs.toISOString(), endTs: endTs.toISOString()
-  })));
-  settledRewards.forEach((result, index) => {
-    const metadata = PLAN_METADATA[index];
-    if (result.status === "fulfilled") {
-      rewardResults.push([metadata.domain, { services: result.value.rewards?.services ?? [] }]);
-    } else {
-      rewardResults.push([metadata.domain, { services: [], error: result.reason instanceof Error ? result.reason.message : String(result.reason) }]);
+  const rewardResults: Array<readonly [string, RewardEntry]> = [];
+  const settledRewards = await Promise.all(PLAN_METADATA.map(async (metadata): Promise<RewardEntry> => {
+    const candidates = metadata.rewardDomainCandidates ?? [metadata.domain];
+    const probes = await Promise.allSettled(candidates.map((domain) => fetchGraphQL<{ rewards?: IgniterRewardPayload }>(IGNITER_REWARDS_QUERY, {
+      domains: [domain], startTs: startTs.toISOString(), endTs: endTs.toISOString()
+    })));
+    const resolvedProbes: RewardDomainProbe[] = [];
+    for (let index = 0; index < probes.length; index += 1) {
+      const probe = probes[index];
+      const domain = candidates[index];
+      if (probe.status === "fulfilled") {
+        resolvedProbes.push({ domain, services: probe.value.rewards?.services ?? [] });
+      } else {
+        resolvedProbes.push({ domain, services: [], error: probe.reason instanceof Error ? probe.reason.message : String(probe.reason) });
+      }
     }
+    return chooseRewardDomainProbe(resolvedProbes);
+  }));
+  settledRewards.forEach((entry, index) => {
+    const metadata = PLAN_METADATA[index];
+    rewardResults.push([metadata.identityId ?? metadata.domain, entry]);
   });
   return buildPartialPlans(sourceUpdatedAt, allocationValue, minimumStake, allocationStatus, minimumStakeStatus, new Map(rewardResults), now, PLAN_METADATA, observedShares);
 }
@@ -808,6 +901,8 @@ export const __testing = {
   refreshStakingSnapshot,
   buildPartialPlans,
   buildLivePlans,
+  chooseRewardDomainProbe,
+  resolveStakingProviderIdentity,
   resetLastSuccessfulSnapshot: () => {
     lastSuccessfulSnapshot = null;
     lastServedSnapshot = null;

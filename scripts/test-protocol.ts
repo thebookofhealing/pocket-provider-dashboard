@@ -18,6 +18,7 @@ import { buildStakingProjection, getSelectableStakingPlans } from "@/app/staking
 import { __testing as dashboardTesting, getDashboardDataSafe } from "@/lib/pocket";
 import { ELIGIBLE_SUPPLIER_SNAPSHOT_SCHEMA_VERSION, hasCompleteEligibleSupplierCounts, hasStructurallyCompleteEligibleSupplierCounts, hasStructurallyServableDashboard } from "@/lib/cache-contract";
 import { closeDatabaseForTests, getDashboardCache, getMeta, setDashboardCache, setMeta } from "@/lib/db";
+import { advanceObservedSupplierCursor, isClientShareRefreshDue, observedSupplierConfigFilter } from "@/lib/indexer";
 
 assert.equal(getSelectionProbability(40, 1), 100, "all eligible suppliers fit within session slots");
 assert.equal(getSelectionProbability(100, 0), 0, "no entering suppliers has no selection probability");
@@ -250,6 +251,64 @@ const observedUniform = deriveObservedClientShares([
 assert.equal(observedUniform["fixture.example"]?.status, "uniform", "uniform owner revShare is classified as uniform");
 assert.equal(observedUniform["fixture.example"]?.uniformValue, 55, "the matching owner address is selected");
 assert.deepEqual(observedUniform["fixture.example"]?.byService, { alpha: [55], beta: [55] }, "inactive configs are excluded and provider recipients are not selected");
+assert.equal(observedUniform["fixture.example"]?.activeConfigCount, 2, "active provider config count is retained for diagnostics");
+assert.equal(observedUniform["fixture.example"]?.ownerRevShareMatchCount, 2, "owner-address rev-share matches are retained for diagnostics");
+const unmatchedClientShare = deriveObservedClientShares([
+  { providerDomain: "easy2stake.com", serviceId: "alpha", supplierOwnerAddress: "owner-a", active: true, revShare: [{ address: "other", revSharePercentage: "50" }] }
+], observedAt);
+assert.equal(unmatchedClientShare.easy2stake?.status, "unavailable", "active configs without owner rev-share matches remain explicitly unavailable");
+assert.equal(unmatchedClientShare.easy2stake?.activeConfigCount, 1, "unmatched provider diagnostics retain the active config count");
+assert.equal(unmatchedClientShare.easy2stake?.ownerRevShareMatchCount, 0, "unmatched provider diagnostics retain the zero owner match count");
+const canonicalAliasShares = deriveObservedClientShares([
+  { providerDomain: "api.kleomedes.network", serviceId: "alpha", supplierOwnerAddress: "owner-a", active: true, revShare: [{ address: "owner-a", revSharePercentage: "51" }] },
+  { providerDomain: "kleomedes.cloud", serviceId: "beta", supplierOwnerAddress: "owner-b", active: true, revShare: [{ address: "owner-b", revSharePercentage: "51" }] },
+  { providerDomain: "unknown.example", providerName: "Kleomedes α", serviceId: "gamma", supplierOwnerAddress: "owner-c", active: true, revShare: [{ address: "owner-c", revSharePercentage: "51" }] }
+], observedAt);
+assert.equal(canonicalAliasShares.kleomedes?.uniformValue, 51, "Kleomedes network/cloud/name aliases share one canonical client-share identity");
+assert.equal(stakingTesting.resolveStakingProviderIdentity({ domain: "foo.kleomedes.network" })?.id, "kleomedes", "subdomains resolve through the exact registrable-domain alias");
+assert.equal(stakingTesting.resolveStakingProviderIdentity({ providerName: "Kleomedes α" })?.id, "kleomedes", "provider display-name aliases resolve canonically");
+assert.equal(stakingTesting.resolveStakingProviderIdentity({ providerOverride: "kleomedes", domain: "unknown.example" })?.id, "kleomedes", "explicit supplier overrides take precedence over endpoint domains");
+assert.equal(stakingTesting.resolveStakingProviderIdentity({ providerName: "network" }), null, "weak provider fragments remain unresolved");
+const observedConfigFilter = observedSupplierConfigFilter();
+assert.ok(observedConfigFilter.or.some((entry) => "domains" in entry && entry.domains.contains === "kleomedes.network"), "client-share filter includes canonical declared-domain aliases");
+assert.ok(observedConfigFilter.or.some((entry) => "endpoints" in entry && entry.endpoints.contains === "kleomedes.network"), "client-share filter includes canonical endpoint-url aliases");
+const cursorState = new Set<string>();
+assert.deepEqual(advanceObservedSupplierCursor({ hasNextPage: true, endCursor: "cursor-1" }, cursorState), { done: false, cursor: "cursor-1" }, "client-share pagination advances on a valid cursor");
+assert.deepEqual(advanceObservedSupplierCursor({ hasNextPage: false, endCursor: null }, cursorState), { done: true }, "client-share pagination terminates when hasNextPage is false");
+assert.throws(() => advanceObservedSupplierCursor({ hasNextPage: true, endCursor: null }, cursorState), /did not complete/, "client-share pagination fails closed when the upstream omits a cursor");
+assert.throws(() => advanceObservedSupplierCursor({ hasNextPage: true, endCursor: "cursor-1" }, cursorState), /repeated a cursor/, "client-share pagination fails closed when the upstream repeats a cursor");
+assert.equal(isClientShareRefreshDue(15 * 60 * 1000, 0, 6 * 60 * 60 * 1000), true, "an initial client-share scan is due");
+assert.equal(isClientShareRefreshDue(15 * 60 * 1000, 1, 6 * 60 * 60 * 1000), false, "a failed scan is not immediately retried during the reward refresh window");
+assert.equal(isClientShareRefreshDue(6 * 60 * 60 * 1000 + 1, 1, 6 * 60 * 60 * 1000), true, "a failed scan becomes due again after the client-share interval");
+const selectedRewardProbe = stakingTesting.chooseRewardDomainProbe([
+  { domain: "kleomedes.network", services: [{ gross_rewards: "100", staked_suppliers: 1 }] },
+  { domain: "kleomedes.cloud", services: [{ gross_rewards: "999", staked_suppliers: 1 }] }
+]);
+assert.equal(selectedRewardProbe.sourceDomain, "kleomedes.network", "reward alias resolution selects one verified nonempty domain without double-counting");
+const invalidFirstProbe = stakingTesting.chooseRewardDomainProbe([
+  { domain: "easy2stake.com", services: [{ gross_rewards: "not-a-number", staked_suppliers: 0 }] },
+  { domain: "easy2stake.net", services: [{ gross_rewards: "100", staked_suppliers: 1 }] }
+]);
+assert.equal(invalidFirstProbe.sourceDomain, "easy2stake.net", "reward alias resolution skips nonempty domains with no usable reward rows");
+const mixedValiditySnapshot = stakingTesting.buildLivePlans(
+  snapshotSource,
+  new Map([["fixture.example", [
+    { gross_rewards: "300000000", staked_suppliers: 1 },
+    { gross_rewards: "malformed", staked_suppliers: 0 }
+  ]]]),
+  59_500,
+  new Date("2026-09-22T12:00:00.000Z"),
+  [fixtureMetadata[0]]
+);
+assert.equal(mixedValiditySnapshot.plans.length, 1, "one malformed reward row does not poison an otherwise usable provider");
+assert.match(mixedValiditySnapshot.plans[0]?.diagnosticReason ?? "", /ignored 1 invalid reward service row/, "malformed reward rows are surfaced in provider diagnostics");
+assert.throws(() => stakingTesting.buildLivePlans(
+  snapshotSource,
+  new Map([["fixture.example", [{ gross_rewards: "malformed", staked_suppliers: 0 }]]]),
+  59_500,
+  new Date("2026-09-22T12:00:00.000Z"),
+  [fixtureMetadata[0]]
+), /no configured public provider plans/, "a provider with no usable reward rows remains unavailable");
 const observedVariable = deriveObservedClientShares([
   { providerDomain: "fixture.example", serviceId: "alpha", supplierOwnerAddress: "owner-a", active: true, revShare: [{ address: "owner-a", rev_share_percentage: "50" }] },
   { providerDomain: "fixture.example", serviceId: "beta", supplierOwnerAddress: "owner-b", active: true, revShare: [{ address: "owner-b", revSharePercentage: "70" }] }
@@ -260,6 +319,10 @@ const observedEconomics = stakingTesting.buildLivePlans(snapshotSource, rewardFi
 assert.equal(observedEconomics.plans.find((plan) => plan.id === "fixture")?.clientShare, 55, "uniform observed share drives APR economics");
 assert.equal(observedEconomics.plans.find((plan) => plan.id === "fixture")?.clientShareObservation.source, "pocketdex-onchain", "observed share provenance is persisted");
 assert.equal(observedEconomics.plans.find((plan) => plan.id === "fixture")?.aprMin, undefined, "uniform observed share keeps a single APR");
+const canonicalPlanMetadata = [{ ...fixtureMetadata[0], id: "kleomedes-public", identityId: "kleomedes", domain: "kleomedes.network" }];
+const canonicalPlanRewards = new Map([["kleomedes", rewardFixture.get("fixture.example") ?? []]]);
+const canonicalEconomics = stakingTesting.buildLivePlans(snapshotSource, canonicalPlanRewards, 59_500, new Date("2026-09-22T12:00:00.000Z"), canonicalPlanMetadata, canonicalAliasShares);
+assert.equal(canonicalEconomics.plans[0]?.clientShare, 51, "canonical provider client-share observation feeds the matching public plan across domain aliases");
 const variableEconomics = stakingTesting.buildLivePlans(snapshotSource, rewardFixture, 59_500, new Date("2026-09-22T12:00:00.000Z"), fixtureMetadata, observedVariable);
 assert.equal(variableEconomics.plans.find((plan) => plan.id === "fixture")?.clientShareObservation.status, "variable", "variable observed shares are retained for display");
 const variablePlan = variableEconomics.plans.find((plan) => plan.id === "fixture")!;

@@ -50,6 +50,8 @@ import { aggregateEligibleSupplierCounts, parseEligibleSupplierSnapshot, type El
 import { resolveEligibleSupplierCounts, type EligibleSupplierCountsSnapshot } from "@/lib/eligible-supplier-source";
 import { ELIGIBLE_SUPPLIER_SNAPSHOT_SCHEMA_VERSION, DASHBOARD_CACHE_SCHEMA_VERSION, hasStructurallyServableDashboard } from "@/lib/cache-contract";
 import { deriveObservedClientShares, ensureStakingSnapshotV3, refreshStakingSnapshot, type ObservedClientShareInput, type ObservedClientShares } from "@/lib/staking-plans";
+import { SUPPLIER_PROVIDER_OVERRIDES } from "@/lib/provider-overrides";
+import { resolveStakingProviderIdentity, STAKING_PROVIDER_IDENTITIES } from "@/lib/staking-provider-identity";
 
 type RpcEvent = {
   type: string;
@@ -137,12 +139,38 @@ const ELIGIBLE_SUPPLIER_CONFIGS_QUERY = `query CurrentSupplierServiceConfigs($af
   }
 }`;
 
-const OBSERVED_SUPPLIER_CONFIGS_QUERY = `query ObservedSupplierServiceConfigs($after: Cursor) {
-  supplierServiceConfigs(first: 1000, after: $after) {
+const OBSERVED_SUPPLIER_CONFIGS_QUERY = `query ObservedSupplierServiceConfigs($after: Cursor, $filter: SupplierServiceConfigFilter) {
+  supplierServiceConfigs(first: 1000, after: $after, filter: $filter) {
     nodes { serviceId domains endpoints revShare supplier { ownerId operatorId stakeStatus } }
     pageInfo { hasNextPage endCursor }
   }
 }`;
+
+export function observedSupplierConfigFilter(): { or: Array<{ domains: { contains: string } } | { endpoints: { contains: string } }> } {
+  const providerDomains = Array.from(new Set(STAKING_PROVIDER_IDENTITIES.flatMap((identity) => identity.domainAliases)));
+  return {
+    or: providerDomains.flatMap((domain) => [
+      { domains: { contains: domain } },
+      { endpoints: { contains: domain } }
+    ])
+  };
+}
+
+export function advanceObservedSupplierCursor(
+  pageInfo: { hasNextPage?: boolean | null; endCursor?: string | null } | null | undefined,
+  seenCursors: Set<string>
+): { done: true } | { done: false; cursor: string } {
+  if (pageInfo?.hasNextPage !== true) return { done: true };
+  const cursor = pageInfo.endCursor ?? null;
+  if (!cursor) throw new Error("data.pocket.network observed supplier pagination did not complete");
+  if (seenCursors.has(cursor)) throw new Error("data.pocket.network observed supplier pagination repeated a cursor");
+  seenCursors.add(cursor);
+  return { done: false, cursor };
+}
+
+export function isClientShareRefreshDue(now: number, lastAttemptAt: number, intervalMs: number): boolean {
+  return lastAttemptAt === 0 || now - lastAttemptAt >= intervalMs;
+}
 
 type RewardDistributionDetail = {
   op_reason: string;
@@ -262,12 +290,12 @@ const REPAIR_CONCURRENCY = Number(process.env.POCKET_INDEXER_REPAIR_CONCURRENCY 
 const REPAIR_FAILED_COOLDOWN_MS = Number(process.env.POCKET_INDEXER_REPAIR_FAILED_COOLDOWN_MS ?? 300_000);
 const REPAIR_MAX_FAILED_RETRIES = Number(process.env.POCKET_INDEXER_REPAIR_MAX_FAILED_RETRIES ?? 10);
 const STAKING_REFRESH_INTERVAL_MS = Number(process.env.POCKET_INDEXER_STAKING_REFRESH_INTERVAL_MS ?? 15 * 60 * 1000);
+const STAKING_CLIENT_SHARE_REFRESH_INTERVAL_MS = Number(process.env.POCKET_INDEXER_STAKING_CLIENT_SHARE_REFRESH_INTERVAL_MS ?? 6 * 60 * 60 * 1000);
 const MIGRATION_MAX_RETRIES = 3;
 const MIGRATION_RETRY_DELAY_MS = 5000;
 const WINDOWS: TimeWindow[] = ["24h", "7d", "30d"];
 const SETTLEMENT_EVENT_TYPE = "pocket.tokenomics.EventClaimSettled";
 const SECOND_LEVEL_SUFFIXES = new Set(["co.uk", "org.uk", "com.au", "net.au", "co.jp", "com.br"]);
-const STAKING_PROVIDER_DOMAINS = new Set(["kleomedes.cloud", "kalorius.tech", "nodefleet.net", "purroofgroup.com", "easy2stake.com"]);
 const SUPPLIER_REWARD_REASONS = new Set([
   "TLM_RELAY_BURN_EQUALS_MINT_SUPPLIER_SHAREHOLDER_REWARD_DISTRIBUTION",
   "TLM_GLOBAL_MINT_SUPPLIER_SHAREHOLDER_REWARD_DISTRIBUTION"
@@ -278,6 +306,9 @@ let cacheDirty = true;
 let liveCatchupInFlight = false;
 let lastSessionSyncAt = 0;
 let lastStakingRefreshAt = 0;
+let lastClientShareRefreshAt = 0;
+let lastClientShareRefreshAttemptAt = 0;
+let clientShareRefreshInFlight: Promise<void> | null = null;
 const SESSION_SYNC_INTERVAL_MS = 60 * 60 * 1000;
 const SESSION_FRESHNESS_MS = 60 * 60 * 1000;
 const INDEXER_DATA_VERSION = 4;
@@ -287,17 +318,38 @@ let knownServiceIds = new Set<string>();
 
 async function maybeRefreshStakingSnapshot(force = false): Promise<void> {
   if (!force && Date.now() - lastStakingRefreshAt < STAKING_REFRESH_INTERVAL_MS) return;
-  let observedShares: ObservedClientShares | undefined;
-  try {
-    observedShares = await fetchObservedClientShares();
-    logInfo("Observed PocketDex client shares refreshed", { providerCount: Object.keys(observedShares).length });
-  } catch (error) {
-    // The staking refresh still runs for reward data. When PocketDex is down,
-    // staking-plans retains the last observed client-share values from SQLite.
-    logWarn("PocketDex client-share refresh failed; retaining observed LKG", { error: error instanceof Error ? error.message : String(error) });
+  const clientShareRefreshDue = force || isClientShareRefreshDue(Date.now(), lastClientShareRefreshAttemptAt, STAKING_CLIENT_SHARE_REFRESH_INTERVAL_MS);
+  if (clientShareRefreshDue && !clientShareRefreshInFlight) {
+    const pagination = { pageCount: 0, rowCount: 0, startedAt: Date.now() };
+    lastClientShareRefreshAttemptAt = pagination.startedAt;
+    clientShareRefreshInFlight = (async () => {
+      try {
+        const observedShares = await fetchObservedClientShares(pagination);
+        lastClientShareRefreshAt = Date.now();
+        logInfo("Observed PocketDex client shares refreshed", { providerCount: Object.keys(observedShares).length });
+        // Apply the completed observation separately; the 15-minute reward
+        // refresh never waits on this network-wide config scan.
+        await refreshStakingSnapshot(observedShares);
+      } catch (error) {
+        // A partial/failed scan never becomes the new observation. The next
+        // attempt retries from the persisted complete last-known-good state.
+        setIndexerState("staking_client_share_pagination", JSON.stringify({
+          status: "failed",
+          failedAt: new Date().toISOString(),
+          error: error instanceof Error ? error.message : String(error),
+          pageCount: pagination.pageCount,
+          rowCount: pagination.rowCount,
+          durationMs: Date.now() - pagination.startedAt,
+          filter: "canonical provider domains and endpoint URLs"
+        }));
+        logWarn("PocketDex client-share refresh failed; retaining observed LKG", { error: error instanceof Error ? error.message : String(error) });
+      } finally {
+        clientShareRefreshInFlight = null;
+      }
+    })();
   }
   try {
-    await refreshStakingSnapshot(observedShares);
+    await refreshStakingSnapshot();
     lastStakingRefreshAt = Date.now();
   } catch (error) {
     logError("Staking snapshot refresh failed", error);
@@ -848,41 +900,67 @@ function supplierConfigDomain(node: { domains?: unknown; endpoints?: unknown }):
     const hostname = getHostname(candidate.includes("://") ? candidate : `https://${candidate}`);
     return hostname ? [getRegistrableDomain(hostname)] : [];
   });
-  const knownProviderDomain = normalized.find((domain) => STAKING_PROVIDER_DOMAINS.has(domain));
-  if (knownProviderDomain) return knownProviderDomain;
-  return normalized[0] ?? null;
+  const knownAlias = normalized.find((domain) => resolveStakingProviderIdentity({ domain }));
+  return knownAlias ?? normalized[0] ?? null;
 }
 
-async function fetchObservedClientShares(): Promise<ObservedClientShares> {
+type ClientSharePaginationDiagnostics = { pageCount: number; rowCount: number; startedAt: number };
+
+async function fetchObservedClientShares(pagination: ClientSharePaginationDiagnostics = { pageCount: 0, rowCount: 0, startedAt: Date.now() }): Promise<ObservedClientShares> {
   const inputs: ObservedClientShareInput[] = [];
   let after: string | null = null;
-  for (let page = 0; page < 20; page += 1) {
+  const filter = observedSupplierConfigFilter();
+  const seenCursors = new Set<string>();
+  while (true) {
     const response: PoktscanObservedSupplierConfigsResponse = await fetchJson<PoktscanObservedSupplierConfigsResponse>(POKTSCAN_URL, ELIGIBLE_SUPPLIER_TIMEOUT_MS, {
       method: "POST",
       headers: { accept: "application/json", "content-type": "application/json" },
-      body: JSON.stringify({ query: OBSERVED_SUPPLIER_CONFIGS_QUERY, variables: { after } })
+      body: JSON.stringify({ query: OBSERVED_SUPPLIER_CONFIGS_QUERY, variables: { after, filter } })
     });
     const connection: NonNullable<PoktscanObservedSupplierConfigsResponse["data"]>["supplierServiceConfigs"] = response.data?.supplierServiceConfigs;
     if (!connection) throw new Error("data.pocket.network returned no supplier service config connection");
+    pagination.pageCount += 1;
+    pagination.rowCount += connection.nodes?.length ?? 0;
     for (const node of connection.nodes ?? []) {
       if (!node?.serviceId || !node.supplier?.ownerId) continue;
       const providerDomain = supplierConfigDomain(node);
       if (!providerDomain) continue;
+      const providerOverride = SUPPLIER_PROVIDER_OVERRIDES[node.supplier.operatorId ?? ""]?.providerKey
+        ?? SUPPLIER_PROVIDER_OVERRIDES[node.supplier.ownerId]?.providerKey
+        ?? null;
+      const overrideRecord = (node.supplier.operatorId ? SUPPLIER_PROVIDER_OVERRIDES[node.supplier.operatorId] : undefined)
+        ?? SUPPLIER_PROVIDER_OVERRIDES[node.supplier.ownerId];
+      // The public GraphQL supplier config does not expose an independent
+      // provider label. Do not manufacture one from the same domain resolver:
+      // that would make name inference circular. A configured override label
+      // remains an independent, explicit source when one is supplied.
+      const providerName = overrideRecord?.providerLabel ?? null;
       inputs.push({
         providerDomain,
+        providerOverride,
+        providerName,
         serviceId: node.serviceId,
         supplierOwnerAddress: node.supplier.ownerId,
         active: (node.supplier.stakeStatus ?? "").toLowerCase() === "staked",
         revShare: node.revShare
       });
     }
-    if (connection.pageInfo?.hasNextPage !== true) {
-      return deriveObservedClientShares(inputs, new Date().toISOString());
+    const nextCursor = advanceObservedSupplierCursor(connection.pageInfo, seenCursors);
+    if (nextCursor.done) {
+      const observedShares = deriveObservedClientShares(inputs, new Date().toISOString());
+      setIndexerState("staking_client_share_pagination", JSON.stringify({
+        status: "complete",
+        pageCount: pagination.pageCount,
+        rowCount: pagination.rowCount,
+        durationMs: Date.now() - pagination.startedAt,
+        completedAt: new Date().toISOString(),
+        filter: "canonical provider domains and endpoint URLs"
+      }));
+      logInfo("PocketDex client-share pagination completed", { pageCount: pagination.pageCount, rowCount: pagination.rowCount, durationMs: Date.now() - pagination.startedAt });
+      return observedShares;
     }
-    after = connection.pageInfo.endCursor ?? null;
-    if (!after) throw new Error("data.pocket.network observed supplier pagination did not complete");
+    after = nextCursor.cursor;
   }
-  throw new Error("data.pocket.network observed supplier pagination exceeded limit");
 }
 
 async function syncEligibleSupplierCounts(): Promise<{ snapshot: EligibleSupplierCountsSnapshot | null; stale: boolean }> {

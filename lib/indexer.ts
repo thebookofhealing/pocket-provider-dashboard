@@ -156,6 +156,18 @@ export function observedSupplierConfigFilter(): { or: Array<{ domains: { contain
   };
 }
 
+export function advanceObservedSupplierCursor(
+  pageInfo: { hasNextPage?: boolean | null; endCursor?: string | null } | null | undefined,
+  seenCursors: Set<string>
+): { done: true } | { done: false; cursor: string } {
+  if (pageInfo?.hasNextPage !== true) return { done: true };
+  const cursor = pageInfo.endCursor ?? null;
+  if (!cursor) throw new Error("data.pocket.network observed supplier pagination did not complete");
+  if (seenCursors.has(cursor)) throw new Error("data.pocket.network observed supplier pagination repeated a cursor");
+  seenCursors.add(cursor);
+  return { done: false, cursor };
+}
+
 type RewardDistributionDetail = {
   op_reason: string;
   amount: string;
@@ -274,6 +286,7 @@ const REPAIR_CONCURRENCY = Number(process.env.POCKET_INDEXER_REPAIR_CONCURRENCY 
 const REPAIR_FAILED_COOLDOWN_MS = Number(process.env.POCKET_INDEXER_REPAIR_FAILED_COOLDOWN_MS ?? 300_000);
 const REPAIR_MAX_FAILED_RETRIES = Number(process.env.POCKET_INDEXER_REPAIR_MAX_FAILED_RETRIES ?? 10);
 const STAKING_REFRESH_INTERVAL_MS = Number(process.env.POCKET_INDEXER_STAKING_REFRESH_INTERVAL_MS ?? 15 * 60 * 1000);
+const STAKING_CLIENT_SHARE_REFRESH_INTERVAL_MS = Number(process.env.POCKET_INDEXER_STAKING_CLIENT_SHARE_REFRESH_INTERVAL_MS ?? 6 * 60 * 60 * 1000);
 const MIGRATION_MAX_RETRIES = 3;
 const MIGRATION_RETRY_DELAY_MS = 5000;
 const WINDOWS: TimeWindow[] = ["24h", "7d", "30d"];
@@ -289,6 +302,8 @@ let cacheDirty = true;
 let liveCatchupInFlight = false;
 let lastSessionSyncAt = 0;
 let lastStakingRefreshAt = 0;
+let lastClientShareRefreshAt = 0;
+let clientShareRefreshInFlight: Promise<void> | null = null;
 const SESSION_SYNC_INTERVAL_MS = 60 * 60 * 1000;
 const SESSION_FRESHNESS_MS = 60 * 60 * 1000;
 const INDEXER_DATA_VERSION = 4;
@@ -298,17 +313,33 @@ let knownServiceIds = new Set<string>();
 
 async function maybeRefreshStakingSnapshot(force = false): Promise<void> {
   if (!force && Date.now() - lastStakingRefreshAt < STAKING_REFRESH_INTERVAL_MS) return;
-  let observedShares: ObservedClientShares | undefined;
-  try {
-    observedShares = await fetchObservedClientShares();
-    logInfo("Observed PocketDex client shares refreshed", { providerCount: Object.keys(observedShares).length });
-  } catch (error) {
-    // The staking refresh still runs for reward data. When PocketDex is down,
-    // staking-plans retains the last observed client-share values from SQLite.
-    logWarn("PocketDex client-share refresh failed; retaining observed LKG", { error: error instanceof Error ? error.message : String(error) });
+  const clientShareRefreshDue = force || Date.now() - lastClientShareRefreshAt >= STAKING_CLIENT_SHARE_REFRESH_INTERVAL_MS;
+  if (clientShareRefreshDue && !clientShareRefreshInFlight) {
+    clientShareRefreshInFlight = (async () => {
+      try {
+        const observedShares = await fetchObservedClientShares();
+        lastClientShareRefreshAt = Date.now();
+        logInfo("Observed PocketDex client shares refreshed", { providerCount: Object.keys(observedShares).length });
+        // Apply the completed observation separately; the 15-minute reward
+        // refresh never waits on this network-wide config scan.
+        await refreshStakingSnapshot(observedShares);
+      } catch (error) {
+        // A partial/failed scan never becomes the new observation. The next
+        // attempt retries from the persisted complete last-known-good state.
+        setIndexerState("staking_client_share_pagination", JSON.stringify({
+          status: "failed",
+          failedAt: new Date().toISOString(),
+          error: error instanceof Error ? error.message : String(error),
+          filter: "canonical provider domains and endpoint URLs"
+        }));
+        logWarn("PocketDex client-share refresh failed; retaining observed LKG", { error: error instanceof Error ? error.message : String(error) });
+      } finally {
+        clientShareRefreshInFlight = null;
+      }
+    })();
   }
   try {
-    await refreshStakingSnapshot(observedShares);
+    await refreshStakingSnapshot();
     lastStakingRefreshAt = Date.now();
   } catch (error) {
     logError("Staking snapshot refresh failed", error);
@@ -905,7 +936,8 @@ async function fetchObservedClientShares(): Promise<ObservedClientShares> {
         revShare: node.revShare
       });
     }
-    if (connection.pageInfo?.hasNextPage !== true) {
+    const nextCursor = advanceObservedSupplierCursor(connection.pageInfo, seenCursors);
+    if (nextCursor.done) {
       const observedShares = deriveObservedClientShares(inputs, new Date().toISOString());
       setIndexerState("staking_client_share_pagination", JSON.stringify({
         status: "complete",
@@ -918,10 +950,7 @@ async function fetchObservedClientShares(): Promise<ObservedClientShares> {
       logInfo("PocketDex client-share pagination completed", { pageCount, rowCount, durationMs: Date.now() - startedAt });
       return observedShares;
     }
-    after = connection.pageInfo.endCursor ?? null;
-    if (!after) throw new Error("data.pocket.network observed supplier pagination did not complete");
-    if (seenCursors.has(after)) throw new Error("data.pocket.network observed supplier pagination repeated a cursor");
-    seenCursors.add(after);
+    after = nextCursor.cursor;
   }
 }
 

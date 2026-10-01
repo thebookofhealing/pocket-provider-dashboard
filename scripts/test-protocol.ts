@@ -16,7 +16,7 @@ import { buildStakingProjection, getSelectableStakingPlans } from "@/app/staking
 import { __testing as dashboardTesting, getDashboardDataSafe } from "@/lib/pocket";
 import { ELIGIBLE_SUPPLIER_SNAPSHOT_SCHEMA_VERSION, hasCompleteEligibleSupplierCounts, hasStructurallyCompleteEligibleSupplierCounts, hasStructurallyServableDashboard } from "@/lib/cache-contract";
 import { closeDatabaseForTests, getDashboardCache, getMeta, setDashboardCache, setMeta } from "@/lib/db";
-import { observedSupplierConfigFilter } from "@/lib/indexer";
+import { advanceObservedSupplierCursor, observedSupplierConfigFilter } from "@/lib/indexer";
 
 assert.equal(getSelectionProbability(40, 1), 100, "all eligible suppliers fit within session slots");
 assert.equal(getSelectionProbability(100, 0), 0, "no entering suppliers has no selection probability");
@@ -241,6 +241,11 @@ assert.equal(stakingTesting.resolveStakingProviderIdentity({ providerName: "netw
 const observedConfigFilter = observedSupplierConfigFilter();
 assert.ok(observedConfigFilter.or.some((entry) => "domains" in entry && entry.domains.contains === "kleomedes.network"), "client-share filter includes canonical declared-domain aliases");
 assert.ok(observedConfigFilter.or.some((entry) => "endpoints" in entry && entry.endpoints.contains === "kleomedes.network"), "client-share filter includes canonical endpoint-url aliases");
+const cursorState = new Set<string>();
+assert.deepEqual(advanceObservedSupplierCursor({ hasNextPage: true, endCursor: "cursor-1" }, cursorState), { done: false, cursor: "cursor-1" }, "client-share pagination advances on a valid cursor");
+assert.deepEqual(advanceObservedSupplierCursor({ hasNextPage: false, endCursor: null }, cursorState), { done: true }, "client-share pagination terminates when hasNextPage is false");
+assert.throws(() => advanceObservedSupplierCursor({ hasNextPage: true, endCursor: null }, cursorState), /did not complete/, "client-share pagination fails closed when the upstream omits a cursor");
+assert.throws(() => advanceObservedSupplierCursor({ hasNextPage: true, endCursor: "cursor-1" }, cursorState), /repeated a cursor/, "client-share pagination fails closed when the upstream repeats a cursor");
 const selectedRewardProbe = stakingTesting.chooseRewardDomainProbe([
   { domain: "kleomedes.network", services: [{ gross_rewards: "100", staked_suppliers: 1 }] },
   { domain: "kleomedes.cloud", services: [{ gross_rewards: "999", staked_suppliers: 1 }] }

@@ -51,7 +51,7 @@ import { resolveEligibleSupplierCounts, type EligibleSupplierCountsSnapshot } fr
 import { ELIGIBLE_SUPPLIER_SNAPSHOT_SCHEMA_VERSION, DASHBOARD_CACHE_SCHEMA_VERSION, hasStructurallyServableDashboard } from "@/lib/cache-contract";
 import { deriveObservedClientShares, ensureStakingSnapshotV3, refreshStakingSnapshot, type ObservedClientShareInput, type ObservedClientShares } from "@/lib/staking-plans";
 import { SUPPLIER_PROVIDER_OVERRIDES } from "@/lib/provider-overrides";
-import { resolveStakingProviderIdentity } from "@/lib/staking-provider-identity";
+import { resolveStakingProviderIdentity, STAKING_PROVIDER_IDENTITIES } from "@/lib/staking-provider-identity";
 
 type RpcEvent = {
   type: string;
@@ -139,8 +139,8 @@ const ELIGIBLE_SUPPLIER_CONFIGS_QUERY = `query CurrentSupplierServiceConfigs($af
   }
 }`;
 
-const OBSERVED_SUPPLIER_CONFIGS_QUERY = `query ObservedSupplierServiceConfigs($after: Cursor) {
-  supplierServiceConfigs(first: 1000, after: $after) {
+const OBSERVED_SUPPLIER_CONFIGS_QUERY = `query ObservedSupplierServiceConfigs($after: Cursor, $filter: SupplierServiceConfigFilter) {
+  supplierServiceConfigs(first: 1000, after: $after, filter: $filter) {
     nodes { serviceId domains endpoints revShare supplier { ownerId operatorId stakeStatus } }
     pageInfo { hasNextPage endCursor }
   }
@@ -856,11 +856,14 @@ function supplierConfigDomain(node: { domains?: unknown; endpoints?: unknown }):
 async function fetchObservedClientShares(): Promise<ObservedClientShares> {
   const inputs: ObservedClientShareInput[] = [];
   let after: string | null = null;
-  for (let page = 0; page < 20; page += 1) {
+  const providerDomains = Array.from(new Set(STAKING_PROVIDER_IDENTITIES.flatMap((identity) => identity.domainAliases)));
+  const filter = { or: providerDomains.map((domain) => ({ domains: { contains: domain } })) };
+  const seenCursors = new Set<string>();
+  while (true) {
     const response: PoktscanObservedSupplierConfigsResponse = await fetchJson<PoktscanObservedSupplierConfigsResponse>(POKTSCAN_URL, ELIGIBLE_SUPPLIER_TIMEOUT_MS, {
       method: "POST",
       headers: { accept: "application/json", "content-type": "application/json" },
-      body: JSON.stringify({ query: OBSERVED_SUPPLIER_CONFIGS_QUERY, variables: { after } })
+      body: JSON.stringify({ query: OBSERVED_SUPPLIER_CONFIGS_QUERY, variables: { after, filter } })
     });
     const connection: NonNullable<PoktscanObservedSupplierConfigsResponse["data"]>["supplierServiceConfigs"] = response.data?.supplierServiceConfigs;
     if (!connection) throw new Error("data.pocket.network returned no supplier service config connection");
@@ -873,13 +876,11 @@ async function fetchObservedClientShares(): Promise<ObservedClientShares> {
         ?? null;
       const overrideRecord = (node.supplier.operatorId ? SUPPLIER_PROVIDER_OVERRIDES[node.supplier.operatorId] : undefined)
         ?? SUPPLIER_PROVIDER_OVERRIDES[node.supplier.ownerId];
-      // The public GraphQL supplier config does not expose a provider label.
-      // Join the normalized domain to the canonical local registry so the
-      // approved provider-name fallback is exercised in the live ingestion
-      // path, while explicit override labels retain priority.
-      const providerName = overrideRecord?.providerLabel
-        ?? resolveStakingProviderIdentity({ domain: providerDomain })?.provider
-        ?? null;
+      // The public GraphQL supplier config does not expose an independent
+      // provider label. Do not manufacture one from the same domain resolver:
+      // that would make name inference circular. A configured override label
+      // remains an independent, explicit source when one is supplied.
+      const providerName = overrideRecord?.providerLabel ?? null;
       inputs.push({
         providerDomain,
         providerOverride,
@@ -895,8 +896,9 @@ async function fetchObservedClientShares(): Promise<ObservedClientShares> {
     }
     after = connection.pageInfo.endCursor ?? null;
     if (!after) throw new Error("data.pocket.network observed supplier pagination did not complete");
+    if (seenCursors.has(after)) throw new Error("data.pocket.network observed supplier pagination repeated a cursor");
+    seenCursors.add(after);
   }
-  throw new Error("data.pocket.network observed supplier pagination exceeded limit");
 }
 
 async function syncEligibleSupplierCounts(): Promise<{ snapshot: EligibleSupplierCountsSnapshot | null; stale: boolean }> {

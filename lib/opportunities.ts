@@ -1,4 +1,4 @@
-type OpportunityService = {
+export type OpportunityService = {
   serviceId: string;
   serviceName: string;
   supplierCount?: number;
@@ -6,11 +6,16 @@ type OpportunityService = {
   providerCount: number;
   relays: number;
   computeUnits?: number;
+  appsStaked?: number;
   revenueUpokt: string | bigint;
 };
 
 export const SESSION_SUPPLIER_SLOTS = 50;
 export const DEFAULT_NEW_PROVIDER_SUPPLIERS = 15;
+
+function isActiveOpportunityService(service: OpportunityService): boolean {
+  return toBigInt(service.revenueUpokt) > 0n || service.relays > 0 || (service.computeUnits ?? 0) > 0;
+}
 
 export type ProviderServiceOpportunity = {
   serviceId: string;
@@ -43,6 +48,43 @@ function toPoktNumber(value: bigint): number {
 
 function getEligibleSupplierCount(service: OpportunityService): number {
   return Math.max(0, Math.round(service.eligibleSupplierCount ?? 0));
+}
+
+/**
+ * Demand Signal v2 raw score. It intentionally uses only historical reward
+ * rate, eligible-supplier competition, and session access; provider/app
+ * counts are not inputs to this signal.
+ */
+export function getDemandSignalBase(service: OpportunityService, sessionSlots = SESSION_SUPPLIER_SLOTS): number | null {
+  if (service.eligibleSupplierCount == null || !isActiveOpportunityService(service)) return null;
+  const eligibleSuppliers = getEligibleSupplierCount(service);
+  const rewardPokt = toPoktNumber(toBigInt(service.revenueUpokt));
+  const sessionAccess = getSelectionProbability(eligibleSuppliers, DEFAULT_NEW_PROVIDER_SUPPLIERS, sessionSlots) / 100;
+  return rewardPokt / (eligibleSuppliers + DEFAULT_NEW_PROVIDER_SUPPLIERS) * (0.50 + 0.50 * Math.sqrt(Math.max(0, Math.min(1, sessionAccess))));
+}
+
+/**
+ * Percentile-rank Demand Signal v2 over the complete active-chain universe.
+ * Missing eligible counts are excluded from the comparison universe and are
+ * therefore represented as an explicit unavailable state at the call site.
+ */
+export function rankDemandSignals(services: OpportunityService[], sessionSlots = SESSION_SUPPLIER_SLOTS): Map<string, number> {
+  const scored = services
+    .map((service) => ({ service, score: getDemandSignalBase(service, sessionSlots) }))
+    .filter((entry): entry is { service: OpportunityService; score: number } => entry.score != null);
+  const ranks = new Map<string, number>();
+  if (scored.length === 0) return ranks;
+  if (scored.length === 1) {
+    ranks.set(scored[0].service.serviceId, 100);
+    return ranks;
+  }
+  for (const entry of scored) {
+    const lowerCount = scored.filter((candidate) => candidate.score < entry.score).length;
+    const tieCount = scored.filter((candidate) => candidate.score === entry.score).length;
+    const averageZeroBasedRank = lowerCount + (tieCount - 1) / 2;
+    ranks.set(entry.service.serviceId, (averageZeroBasedRank / (scored.length - 1)) * 100);
+  }
+  return ranks;
 }
 
 export function getProjectedRevenueUpokt(revenueUpokt: bigint, existingSupplierCount: number, enteringSupplierCount: number): bigint {
@@ -132,19 +174,7 @@ export function buildProviderServiceOpportunity(
   const expectedSharePercent = totalSuppliers === 0 ? 0 : (providerSupplierCount / totalSuppliers) * 100;
   const sessionSlots = options?.sessionSlots ?? SESSION_SUPPLIER_SLOTS;
   const selectionProbability = eligibleSupplierCountAvailable ? getSelectionProbability(supplierCount, providerSupplierCount, sessionSlots) : 0;
-  const projectedRevenuePerSupplierPokt = toPoktNumber(projectedRevenuePerSupplierUpokt);
-
-  let appComponent = 0;
-  if (options?.appsStaked != null && options.appsStaked > 0) {
-    const expectedAssignments = getExpectedAssignments(options.appsStaked, sessionSlots, providerSupplierCount, totalSuppliers);
-    const maxAssignments = providerSupplierCount * sessionSlots;
-    if (maxAssignments > 0 && expectedAssignments > 0) {
-      const normalized = expectedAssignments / maxAssignments;
-      appComponent = Math.log2(1 + normalized) * 0.15;
-    }
-  }
-
-  const opportunityScore = projectedRevenuePerSupplierPokt * (0.55 + (selectionProbability / 100) * 0.30 + appComponent);
+  const opportunityScore = getDemandSignalBase(service, sessionSlots) ?? 0;
 
   const result: ProviderServiceOpportunity = {
     serviceId: service.serviceId,
@@ -261,20 +291,10 @@ export function buildAllocatedServiceOpportunity(
   const projectedRevenuePerSupplierUpokt = allocatedSupplierCount > 0
     ? projectedRevenueUpokt / BigInt(allocatedSupplierCount)
     : 0n;
-  const projectedRevenuePerSupplierPokt = toPoktNumber(projectedRevenuePerSupplierUpokt);
   const sessionSlots = options?.sessionSlots ?? SESSION_SUPPLIER_SLOTS;
   const eligibleSupplierCount = getEligibleSupplierCount(service);
   const selectionProbability = service.eligibleSupplierCount != null ? getSelectionProbability(eligibleSupplierCount, allocatedSupplierCount, sessionSlots) : 0;
   const totalSuppliers = eligibleSupplierCount + allocatedSupplierCount;
-
-  let appComponent = 0;
-  if (options?.appsStaked != null && options.appsStaked > 0) {
-    const expectedAssignments = getExpectedAssignments(options.appsStaked, sessionSlots, allocatedSupplierCount, totalSuppliers);
-    const maxAssignments = allocatedSupplierCount * sessionSlots;
-    if (maxAssignments > 0) {
-      appComponent = Math.min(expectedAssignments / (maxAssignments * 0.5), 1) * 0.15;
-    }
-  }
 
   const result: ProviderServiceOpportunity = {
     ...opportunity,
@@ -286,7 +306,7 @@ export function buildAllocatedServiceOpportunity(
     expectedSharePercent: (eligibleSupplierCount + allocatedSupplierCount) === 0
       ? 0
       : (allocatedSupplierCount / (eligibleSupplierCount + allocatedSupplierCount)) * 100,
-    opportunityScore: projectedRevenuePerSupplierPokt * (0.55 + (selectionProbability / 100) * 0.30 + appComponent)
+    opportunityScore: getDemandSignalBase(service, sessionSlots) ?? 0
   };
 
   if (options?.appsStaked != null && options.appsStaked > 0) {

@@ -2963,6 +2963,94 @@ code {
   }
 }
 
+/* Issue #43 polish -------------------------------------------------------- */
+
+.supplier-counts-synced {
+  display: inline-flex;
+  align-items: center;
+  width: fit-content;
+  margin-top: 10px;
+  border-color: rgba(82, 214, 166, 0.28);
+  color: var(--green);
+  background: rgba(82, 214, 166, 0.1);
+}
+
+.rewards-calculator-checklist {
+  align-content: start;
+  gap: 10px;
+  padding-top: 16px;
+  padding-bottom: 18px;
+}
+
+.rewards-calculator-checklist .section-title-row {
+  margin-bottom: 0;
+}
+
+.rewards-calculator-checklist .calculator-actions {
+  margin-bottom: 0 !important;
+}
+
+.rewards-calculator-checklist .calculator-list {
+  max-height: 680px;
+  gap: 10px;
+}
+
+.rewards-calculator-disclaimers {
+  margin-top: 24px;
+}
+
+@media (min-width: 901px) {
+  .explorer-table {
+    table-layout: fixed;
+  }
+
+  .explorer-table th:first-child,
+  .explorer-table td:first-child {
+    width: 20%;
+  }
+
+  .explorer-table th:nth-child(2),
+  .explorer-table td:nth-child(2) {
+    width: 15%;
+  }
+
+  .explorer-table th:nth-child(3),
+  .explorer-table td:nth-child(3) {
+    width: 11%;
+  }
+
+  .explorer-table th:nth-child(4),
+  .explorer-table td:nth-child(4),
+  .explorer-table th:nth-child(5),
+  .explorer-table td:nth-child(5) {
+    width: 11%;
+  }
+
+  .explorer-table th:nth-child(6),
+  .explorer-table td:nth-child(6) {
+    width: 15%;
+  }
+
+  .explorer-table th:nth-child(7),
+  .explorer-table td:nth-child(7) {
+    width: 17%;
+  }
+
+  .explorer-table-wrap {
+    padding-right: 24px;
+    padding-left: 24px;
+  }
+
+  .explorer-table-shell {
+    margin-right: -24px;
+    margin-left: -24px;
+  }
+
+  .explorer-table td:first-child {
+    overflow-wrap: anywhere;
+  }
+}
+
 @media (max-width: 480px) {
   .btn {
     width: 100%;
@@ -3326,19 +3414,6 @@ a:hover {
 .dashboard-hero-showcase::before {
   opacity: 0.72;
   background-size: 56px 56px;
-}
-
-.dashboard-hero-showcase::after {
-  content: "KLEOMEDES / POCKET NETWORK";
-  position: absolute;
-  right: 28px;
-  bottom: 22px;
-  color: rgba(255, 255, 255, 0.14);
-  font-size: 0.58rem;
-  font-weight: 700;
-  letter-spacing: 0.34em;
-  writing-mode: vertical-rl;
-  transform: rotate(180deg);
 }
 
 .dashboard-hero-orb {

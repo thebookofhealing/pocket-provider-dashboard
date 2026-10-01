@@ -4,10 +4,10 @@ import Link from "next/link";
 import { useMemo, useState, useEffect } from "react";
 
 import { formatCompactNumber, formatCompactUpokt, formatDecimal, formatInteger, formatUsd, formatUpokt } from "@/lib/format";
-import { buildAllocatedServiceOpportunity, DEFAULT_NEW_PROVIDER_SUPPLIERS, SESSION_SUPPLIER_SLOTS } from "@/lib/opportunities";
+import { rankDemandSignals, SESSION_SUPPLIER_SLOTS } from "@/lib/opportunities";
 import type { SerializedDashboardData, SerializedServiceStats } from "@/lib/types";
 
-type SortKey = "service" | "revenue" | "relays" | "computeUnits" | "providers" | "suppliers" | "appsStaked" | "revenuePerProvider" | "opportunity";
+type SortKey = "service" | "revenue" | "relays" | "computeUnits" | "providers" | "suppliers" | "revenuePerProvider" | "opportunity";
 type SortDirection = "asc" | "desc";
 
 type SortColumn = {
@@ -24,13 +24,12 @@ const SORT_COLUMNS: SortColumn[] = [
   { key: "relays", label: "Relay Count", align: "right" },
   { key: "providers", label: "Providers", align: "right" },
   { key: "suppliers", label: "Suppliers", align: "right" },
-  { key: "appsStaked", label: "Apps", align: "right", tooltip: "Applications staked for this service (live snapshot). Auxiliary metric — does not affect the demand signal ranking." },
   { key: "revenuePerProvider", label: "Avg Domain Reward", align: "right" },
   {
     key: "opportunity",
     label: "Demand Signal (experimental)",
     align: "right",
-    tooltip: "Combines revenue yield, supplier competition, and modeled application-session opportunities. Applications increase session selection breadth but do not guarantee workload or revenue. The higher the score, the more potential for providers to profit from participating in this network."
+    tooltip: "Ranks each chain’s revenue opportunity for a new provider with 15 suppliers, accounting for the reward pool, eligible supplier competition, and modeled session access. Higher scores indicate stronger relative opportunity."
   }
 ];
 
@@ -57,11 +56,7 @@ function revenuePerProvider(service: SerializedServiceStats): number {
   return toPoktNumber(service.revenueUpokt) / Math.max(service.providerCount, 1);
 }
 
-function onboardingOpportunityScore(service: SerializedServiceStats, suppliersPerSession: number): number {
-  return buildAllocatedServiceOpportunity(service, DEFAULT_NEW_PROVIDER_SUPPLIERS, DEFAULT_NEW_PROVIDER_SUPPLIERS, { sessionSlots: suppliersPerSession, appsStaked: service.appsStaked }).opportunityScore;
-}
-
-function getSortValue(service: SerializedServiceStats, sort: SortKey, suppliersPerSession: number): string | number | bigint {
+function getSortValue(service: SerializedServiceStats, sort: SortKey, demandSignalRanks: Map<string, number>): string | number | bigint {
   switch (sort) {
     case "service":
       return service.serviceName;
@@ -75,12 +70,10 @@ function getSortValue(service: SerializedServiceStats, sort: SortKey, suppliersP
       return service.providerCount;
     case "suppliers":
       return service.supplierCount ?? 0;
-    case "appsStaked":
-      return service.appsStaked ?? 0;
     case "revenuePerProvider":
       return revenuePerProvider(service);
     case "opportunity":
-      return onboardingOpportunityScore(service, suppliersPerSession);
+      return demandSignalRanks.get(service.serviceId) ?? 0;
   }
 }
 
@@ -115,6 +108,10 @@ export default function ChainsExplorerView({ data }: ChainsExplorerViewProps) {
       : null
   );
   const [healthReportsStale, setHealthReportsStale] = useState(true);
+  const demandSignalRanks = useMemo(
+    () => rankDemandSignals(data?.services ?? [], data?.suppliersPerSession ?? SESSION_SUPPLIER_SLOTS),
+    [data?.services, data?.suppliersPerSession]
+  );
 
   function updateSort(nextSort: SortKey, nextDirection?: SortDirection) {
     if (nextDirection) {
@@ -140,8 +137,15 @@ export default function ChainsExplorerView({ data }: ChainsExplorerViewProps) {
         if (!normalizedQuery) return true;
         return [service.serviceName, service.serviceId].some((value) => value.toLowerCase().includes(normalizedQuery));
       })
-      .sort((a, b) => compareSortValue(getSortValue(a, sort, data?.suppliersPerSession ?? SESSION_SUPPLIER_SLOTS), getSortValue(b, sort, data?.suppliersPerSession ?? SESSION_SUPPLIER_SLOTS), sortDirection) || a.serviceName.localeCompare(b.serviceName));
-  }, [data?.services, query, sort, sortDirection]);
+      .sort((a, b) => {
+        if (sort === "opportunity") {
+          const aUnavailable = !demandSignalRanks.has(a.serviceId);
+          const bUnavailable = !demandSignalRanks.has(b.serviceId);
+          if (aUnavailable !== bUnavailable) return aUnavailable ? 1 : -1;
+        }
+        return compareSortValue(getSortValue(a, sort, demandSignalRanks), getSortValue(b, sort, demandSignalRanks), sortDirection) || a.serviceName.localeCompare(b.serviceName);
+      });
+  }, [data?.services, demandSignalRanks, query, sort, sortDirection]);
 
   const eligibleServices = useMemo(() =>
     services.filter((s) => BigInt(s.revenueUpokt) > 0n || s.relays > 0 || (s.computeUnits ?? 0) > 0),
@@ -252,8 +256,8 @@ export default function ChainsExplorerView({ data }: ChainsExplorerViewProps) {
       <section className="panel section">
         <div className="section-title-row">
           <div>
-            <h2 className="section-title">Search, sort and analyze traffic across chains to identify the best revenue opportunities</h2>
-            <p className="section-subtitle">Data represents the last 30 days of on-chain activity</p>
+            <h2 className="section-title">Analyze traffic across chains to identify the best revenue opportunities.</h2>
+            <p className="section-subtitle">Pocket routes traffic in sessions. For each app and chain, the protocol selects up to 50 eligible suppliers; fewer competing suppliers means a better chance your suppliers are included. Once selected, faster and more reliable suppliers tend to receive more traffic. The Demand Signal estimates which chains offer the strongest revenue opportunity for a new provider with 15 suppliers.</p>
           </div>
           <span
             className={`pill indexer-status-pill ${indexerSynced ? "is-synced" : "is-stale"}`}
@@ -295,7 +299,6 @@ export default function ChainsExplorerView({ data }: ChainsExplorerViewProps) {
               <option value="revenuePerProvider">Avg Domain Reward</option>
               <option value="computeUnits">Compute Units</option>
               <option value="suppliers">Supplier Count</option>
-              <option value="appsStaked">App Count</option>
             </select>
           </div>
         </div>
@@ -339,7 +342,7 @@ export default function ChainsExplorerView({ data }: ChainsExplorerViewProps) {
             </thead>
             <tbody>
               {visibleServices.map((service) => {
-                const opportunity = buildAllocatedServiceOpportunity(service, DEFAULT_NEW_PROVIDER_SUPPLIERS, DEFAULT_NEW_PROVIDER_SUPPLIERS, { sessionSlots: data.suppliersPerSession, appsStaked: service.appsStaked });
+                const demandSignalRank = demandSignalRanks.get(service.serviceId) ?? null;
                 const demandSignalStale = service.eligibleSupplierCountStale === true;
                 const demandSignalStaleTooltip = "Data is stale. This Demand Signal uses the latest available supplier snapshot and may update after the next refresh.";
 
@@ -358,12 +361,11 @@ export default function ChainsExplorerView({ data }: ChainsExplorerViewProps) {
                   <td className="right">{formatInteger(service.relays)}</td>
                   <td className="right">{formatInteger(service.providerCount)}</td>
                   <td className="right">{formatInteger(service.supplierCount ?? 0)}</td>
-                  <td className="right">{formatInteger(service.appsStaked ?? 0)}</td>
                   <td className="right" style={{ color: 'var(--green)', fontWeight: 600 }}>{formatDecimal(revenuePerProvider(service), 1)} POKT</td>
                   <td className="right">
                     <span style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
-                      <span className={`pill ${opportunity.opportunityScore >= 7 ? 'density-low' : opportunity.opportunityScore >= 4 ? 'density-medium' : 'density-high'}`} style={{ fontSize: '0.7rem' }}>
-                        {formatDecimal(opportunity.opportunityScore, 1)} score
+                      <span className={`pill ${demandSignalRank == null ? 'density-high' : demandSignalRank >= 67 ? 'density-low' : demandSignalRank >= 34 ? 'density-medium' : 'density-high'}`} style={{ fontSize: '0.7rem' }}>
+                        {demandSignalRank == null ? 'Unavailable' : `${formatDecimal(demandSignalRank, 1)} percentile`}
                       </span>
                       {demandSignalStale && (
                         <span className="info-tooltip">
@@ -372,11 +374,6 @@ export default function ChainsExplorerView({ data }: ChainsExplorerViewProps) {
                         </span>
                       )}
                     </span>
-                    {service.appsStaked != null && service.appsStaked > 0 && (
-                      <div className="muted" style={{ fontSize: '0.7rem', marginTop: '4px' }}>
-                        {formatDecimal(opportunity.expectedAssignments ?? 0, 1)} exp. / {formatDecimal(opportunity.expectedSessionsRepresented ?? 0, 1)} sessions
-                      </div>
-                    )}
                   </td>
                 </tr>
               )})}

@@ -2,8 +2,10 @@ import assert from "node:assert/strict";
 
 import {
   buildProviderServiceOpportunity,
+  getDemandSignalBase,
   getProjectedRevenueUpokt,
   getSelectionProbability,
+  rankDemandSignals,
   SESSION_SUPPLIER_SLOTS
 } from "@/lib/opportunities";
 import { derivePlanEconomics, isSourceFresh, normalizeSourceTimestamp } from "@/lib/staking-economics";
@@ -86,6 +88,35 @@ assert.ok(getSelectionProbability(10, 15, 50) >= getSelectionProbability(20, 15,
 const meanIndependentOdds = (bnbOpportunity.selectionProbability + ethOpportunity.selectionProbability) / 2;
 assert.equal(meanIndependentOdds, [bnbOpportunity, ethOpportunity].reduce((sum, opportunity) => sum + opportunity.selectionProbability, 0) / 2, "summary odds are the mean of independent service odds");
 assert.equal(ethOpportunity.equalShareRevenueEstimateUpokt, getProjectedRevenueUpokt(50000000n, 5, 15), "removing BNB removes only BNB's contribution");
+
+const demandSignalUniverse = [
+  { serviceId: "low", serviceName: "Low", providerCount: 1, relays: 10, eligibleSupplierCount: 30, revenueUpokt: "100000000" },
+  { serviceId: "high", serviceName: "High", providerCount: 99, relays: 10, eligibleSupplierCount: 10, revenueUpokt: "200000000" },
+  { serviceId: "middle", serviceName: "Middle", providerCount: 2, relays: 10, eligibleSupplierCount: 20, revenueUpokt: "150000000", appsStaked: 999 }
+];
+const demandRanks = rankDemandSignals(demandSignalUniverse);
+assert.equal(demandRanks.get("high"), 100, "highest Demand Signal v2 score ranks at the 100th percentile");
+assert.equal(demandRanks.get("low"), 0, "lowest Demand Signal v2 score ranks at the 0th percentile");
+assert.ok((getDemandSignalBase(demandSignalUniverse[1]) ?? 0) > (getDemandSignalBase(demandSignalUniverse[0]) ?? 0), "Demand Signal v2 is monotonic with revenue and competition inputs");
+assert.equal(getDemandSignalBase({ ...demandSignalUniverse[1], providerCount: 1, appsStaked: 0 }), getDemandSignalBase(demandSignalUniverse[1]), "Demand Signal v2 ignores provider and app counts");
+const filteredDemandRows = demandSignalUniverse.filter((service) => service.serviceId !== "low");
+assert.equal(demandRanks.get("high"), 100, "filtering the displayed rows does not recompute the complete-universe percentile");
+assert.equal(filteredDemandRows.length, 2, "focused percentile test uses a filtered display subset while retaining the full rank map");
+assert.equal(rankDemandSignals([demandSignalUniverse[0]]).get("low"), 100, "a one-chain Demand Signal universe is deterministically ranked at 100");
+const tiedRanks = rankDemandSignals([
+  { ...demandSignalUniverse[0], serviceId: "tie-a" },
+  { ...demandSignalUniverse[0], serviceId: "tie-b" }
+]);
+assert.equal(tiedRanks.get("tie-a"), 50, "a two-chain tie uses the average occupied rank percentile");
+assert.equal(tiedRanks.get("tie-b"), 50, "equal Demand Signal v2 scores receive the same average-rank percentile");
+const middleTieRanks = rankDemandSignals([
+  { ...demandSignalUniverse[0], serviceId: "tie-low", revenueUpokt: "50000000" },
+  { ...demandSignalUniverse[0], serviceId: "tie-a" },
+  { ...demandSignalUniverse[0], serviceId: "tie-b" },
+  { ...demandSignalUniverse[0], serviceId: "tie-high", revenueUpokt: "400000000" }
+]);
+assert.equal(middleTieRanks.get("tie-a"), 50, "a middle tie uses the average of its occupied ranks");
+assert.equal(middleTieRanks.get("tie-b"), 50, "all members of a middle tie share the average occupied rank");
 
 const economics = derivePlanEconomics(7_000_000, 50, 59_500);
 assert.equal(economics.grossDailyPokt, 1);

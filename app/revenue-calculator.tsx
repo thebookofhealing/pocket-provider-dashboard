@@ -63,7 +63,6 @@ export default function RevenueCalculator({ services, suppliersPerSession, sessi
     return eligibleServices.filter((service) => selected.has(service.serviceId));
   }, [eligibleServices, selectedIds]);
   const eligibleCountsReady = hasCompleteEligibleSupplierCounts(selectedServices);
-  const eligibleCountFetchedAt = selectedServices.map((service) => service.eligibleSupplierCountFetchedAt).filter((value): value is string => Boolean(value)).sort()[0];
 
   const selectedRevenueUpokt = selectedServices.reduce((sum, service) => sum + BigInt(service.revenueUpokt), 0n);
   const selectedRelays = selectedServices.reduce((sum, service) => sum + service.relays, 0);
@@ -72,8 +71,6 @@ export default function RevenueCalculator({ services, suppliersPerSession, sessi
   );
   const projectedEntryUpokt = serviceOpportunities.reduce((sum, service) => sum + service.equalShareRevenueEstimateUpokt, 0n);
   const selectedChainCount = selectedServices.length;
-  const foundationCoveredSuppliers = Math.min(supplierCount, FREE_SUPPLIER_BUDGET);
-  const selfFundedSuppliers = Math.max(0, supplierCount - FREE_SUPPLIER_BUDGET);
   const entryPerSupplierUpokt = supplierCount === 0 ? 0n : projectedEntryUpokt / BigInt(supplierCount);
   const averageSelectionProbability = serviceOpportunities.length === 0
     ? 0
@@ -124,10 +121,8 @@ export default function RevenueCalculator({ services, suppliersPerSession, sessi
                     Current eligible supplier counts are unavailable or stale; selection odds and projected rewards are unavailable until the indexer refreshes them.
                   </em>
                 )}
-                {eligibleCountsReady && eligibleCountFetchedAt && (
-                  <em className="muted" style={{ display: 'block', marginTop: '8px' }}>
-                    Eligible supplier counts refreshed at {eligibleCountFetchedAt}.
-                  </em>
+                {eligibleCountsReady && (
+                  <span className="pill supplier-counts-synced" role="status">Supplier Counts Synced</span>
                 )}
                 {sessionStale && (
                   <em className="muted" style={{ display: 'block', marginTop: '8px' }}>
@@ -172,11 +167,9 @@ export default function RevenueCalculator({ services, suppliersPerSession, sessi
             </div>
 
             <div className="calculator-meta-card">
-              <span className="hero-highlight-label">Total Supplier Count</span>
-              <strong className="accent-number">{formatInteger(supplierCount)}</strong>
-              <p>
-                {formatInteger(foundationCoveredSuppliers)} subsidized, {formatInteger(selfFundedSuppliers)} self-funded.
-              </p>
+              <span className="hero-highlight-label">Average Selection Odds</span>
+              <strong className="accent-number" style={{ color: 'var(--accent)' }}>{eligibleCountsReady ? `${formatDecimal(averageSelectionProbability, 0)}%` : "Unavailable"}</strong>
+              <p>Average per-chain session selection probability.</p>
             </div>
 
             <div className="calculator-meta-card">
@@ -191,25 +184,10 @@ export default function RevenueCalculator({ services, suppliersPerSession, sessi
               <p>Projected revenue per active supplier.</p>
             </div>
 
-            <div className="calculator-meta-card">
-              <span className="hero-highlight-label">Average Selection Odds</span>
-              <strong className="accent-number" style={{ color: 'var(--accent)' }}>{eligibleCountsReady ? `${formatDecimal(averageSelectionProbability, 0)}%` : "Unavailable"}</strong>
-              <p>Average per-chain session selection probability.</p>
-            </div>
-
-            <div className="calculator-meta-card calculator-quick-facts">
-              <span className="hero-highlight-label">Quick Facts</span>
-              <ul>
-                <li>Projections are based on the number of suppliers per chain and historical rewards data, therefore it is not a guarantee of future rewards.</li>
-                <li>Each modeled supplier serves every selected chain; Pocket suppliers can serve multiple services simultaneously.</li>
-                <li>If you are a new provider, the foundation may supply you with more or less than 15 suppliers.</li>
-                <li>Supplier selection is protocol-driven, but gateway QoS/routing can influence how much traffic selected suppliers actually receive and therefore can affect realized earnings.</li>
-              </ul>
-            </div>
           </div>
         </div>
 
-        <div className="calculator-checklist panel-inset" style={{ borderRadius: 'var(--radius-lg)', border: '1px solid var(--border)' }}>
+        <div className="calculator-checklist rewards-calculator-checklist panel-inset" style={{ borderRadius: 'var(--radius-lg)', border: '1px solid var(--border)' }}>
           <div className="section-title-row compact-gap">
             <div>
               <h3 className="section-title" style={{ fontSize: '1.2rem' }}>Service Selection</h3>
@@ -261,6 +239,18 @@ export default function RevenueCalculator({ services, suppliersPerSession, sessi
           </div>
         </div>
       </div>
+
+      <section className="panel section staking-notes rewards-calculator-disclaimers">
+        <div className="staking-notes-header">
+          <span className="eyebrow eyebrow-ghost">Calculator guidance</span>
+          <h2 className="section-title">Calculator Disclaimers</h2>
+        </div>
+        <div className="staking-notes-grid">
+          <div><span className="staking-note-icon">01</span><h3>Rewards are not promised</h3><p>Projections are based on historical data and are not a guarantee of future rewards.</p></div>
+          <div><span className="staking-note-icon">02</span><h3>Quality of Service</h3><p>Your traffic while in a session depends heavily on your quality of service, low QoS results in lower revenue.</p></div>
+          <div><span className="staking-note-icon">03</span><h3>Demand Signal</h3><p>Choosing chains with a lower ratio of suppliers and providers to relays can optimize your revenue.</p></div>
+        </div>
+      </section>
     </section>
   );
 }

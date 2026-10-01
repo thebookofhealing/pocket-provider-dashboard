@@ -291,8 +291,11 @@ export default function DashboardView({ initialWindow, dataByWindow, networkHist
     );
   }
 
-  const servicesByRelays = [...data.services].sort((a, b) => b.relays - a.relays);
-  const topService = servicesByRelays[0];
+  const servicesByRevenue = [...data.services].sort((a, b) => {
+    if (b.revenueUpokt === a.revenueUpokt) return b.relays - a.relays;
+    return BigInt(b.revenueUpokt) > BigInt(a.revenueUpokt) ? 1 : -1;
+  });
+  const topRevenueService = servicesByRevenue[0];
   const cuCoverageComplete = (data.computeUnitCoverage ?? 0) >= 1;
   const rewardPoolUsd = toPoktNumber(data.totalRevenueUpokt) * data.poktPriceUsd;
   const rewardsPerMillionRelays = data.totalRelays > 0
@@ -371,7 +374,7 @@ export default function DashboardView({ initialWindow, dataByWindow, networkHist
               <h2>Pocket Network Highlights.</h2>
               <ul className="narrative-points">
                 <li>
-                  <strong>{topService ? topService.serviceName : "n/a"}</strong> had the most relays in the selected period.
+                  <strong>{topRevenueService ? topRevenueService.serviceName : "n/a"}</strong> generated the most provider revenue in the selected period.
                 </li>
                 <li>
                   <strong>{formatUsd(rewardPoolUsd, 1)}</strong> worth of POKT distributed to providers in the selected period.

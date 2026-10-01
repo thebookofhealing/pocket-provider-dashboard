@@ -16,6 +16,7 @@ import { buildStakingProjection, getSelectableStakingPlans } from "@/app/staking
 import { __testing as dashboardTesting, getDashboardDataSafe } from "@/lib/pocket";
 import { ELIGIBLE_SUPPLIER_SNAPSHOT_SCHEMA_VERSION, hasCompleteEligibleSupplierCounts, hasStructurallyCompleteEligibleSupplierCounts, hasStructurallyServableDashboard } from "@/lib/cache-contract";
 import { closeDatabaseForTests, getDashboardCache, getMeta, setDashboardCache, setMeta } from "@/lib/db";
+import { observedSupplierConfigFilter } from "@/lib/indexer";
 
 assert.equal(getSelectionProbability(40, 1), 100, "all eligible suppliers fit within session slots");
 assert.equal(getSelectionProbability(100, 0), 0, "no entering suppliers has no selection probability");
@@ -237,6 +238,9 @@ assert.equal(stakingTesting.resolveStakingProviderIdentity({ domain: "foo.kleome
 assert.equal(stakingTesting.resolveStakingProviderIdentity({ providerName: "Kleomedes α" })?.id, "kleomedes", "provider display-name aliases resolve canonically");
 assert.equal(stakingTesting.resolveStakingProviderIdentity({ providerOverride: "kleomedes", domain: "unknown.example" })?.id, "kleomedes", "explicit supplier overrides take precedence over endpoint domains");
 assert.equal(stakingTesting.resolveStakingProviderIdentity({ providerName: "network" }), null, "weak provider fragments remain unresolved");
+const observedConfigFilter = observedSupplierConfigFilter();
+assert.ok(observedConfigFilter.or.some((entry) => "domains" in entry && entry.domains.contains === "kleomedes.network"), "client-share filter includes canonical declared-domain aliases");
+assert.ok(observedConfigFilter.or.some((entry) => "endpoints" in entry && entry.endpoints.contains === "kleomedes.network"), "client-share filter includes canonical endpoint-url aliases");
 const selectedRewardProbe = stakingTesting.chooseRewardDomainProbe([
   { domain: "kleomedes.network", services: [{ gross_rewards: "100", staked_suppliers: 1 }] },
   { domain: "kleomedes.cloud", services: [{ gross_rewards: "999", staked_suppliers: 1 }] }

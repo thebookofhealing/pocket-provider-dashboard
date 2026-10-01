@@ -146,6 +146,16 @@ const OBSERVED_SUPPLIER_CONFIGS_QUERY = `query ObservedSupplierServiceConfigs($a
   }
 }`;
 
+export function observedSupplierConfigFilter(): { or: Array<{ domains: { contains: string } } | { endpoints: { contains: string } }> } {
+  const providerDomains = Array.from(new Set(STAKING_PROVIDER_IDENTITIES.flatMap((identity) => identity.domainAliases)));
+  return {
+    or: providerDomains.flatMap((domain) => [
+      { domains: { contains: domain } },
+      { endpoints: { contains: domain } }
+    ])
+  };
+}
+
 type RewardDistributionDetail = {
   op_reason: string;
   amount: string;
@@ -856,9 +866,11 @@ function supplierConfigDomain(node: { domains?: unknown; endpoints?: unknown }):
 async function fetchObservedClientShares(): Promise<ObservedClientShares> {
   const inputs: ObservedClientShareInput[] = [];
   let after: string | null = null;
-  const providerDomains = Array.from(new Set(STAKING_PROVIDER_IDENTITIES.flatMap((identity) => identity.domainAliases)));
-  const filter = { or: providerDomains.map((domain) => ({ domains: { contains: domain } })) };
+  const filter = observedSupplierConfigFilter();
   const seenCursors = new Set<string>();
+  let pageCount = 0;
+  let rowCount = 0;
+  const startedAt = Date.now();
   while (true) {
     const response: PoktscanObservedSupplierConfigsResponse = await fetchJson<PoktscanObservedSupplierConfigsResponse>(POKTSCAN_URL, ELIGIBLE_SUPPLIER_TIMEOUT_MS, {
       method: "POST",
@@ -867,6 +879,8 @@ async function fetchObservedClientShares(): Promise<ObservedClientShares> {
     });
     const connection: NonNullable<PoktscanObservedSupplierConfigsResponse["data"]>["supplierServiceConfigs"] = response.data?.supplierServiceConfigs;
     if (!connection) throw new Error("data.pocket.network returned no supplier service config connection");
+    pageCount += 1;
+    rowCount += connection.nodes?.length ?? 0;
     for (const node of connection.nodes ?? []) {
       if (!node?.serviceId || !node.supplier?.ownerId) continue;
       const providerDomain = supplierConfigDomain(node);
@@ -892,7 +906,17 @@ async function fetchObservedClientShares(): Promise<ObservedClientShares> {
       });
     }
     if (connection.pageInfo?.hasNextPage !== true) {
-      return deriveObservedClientShares(inputs, new Date().toISOString());
+      const observedShares = deriveObservedClientShares(inputs, new Date().toISOString());
+      setIndexerState("staking_client_share_pagination", JSON.stringify({
+        status: "complete",
+        pageCount,
+        rowCount,
+        durationMs: Date.now() - startedAt,
+        completedAt: new Date().toISOString(),
+        filter: "canonical provider domains and endpoint URLs"
+      }));
+      logInfo("PocketDex client-share pagination completed", { pageCount, rowCount, durationMs: Date.now() - startedAt });
+      return observedShares;
     }
     after = connection.pageInfo.endCursor ?? null;
     if (!after) throw new Error("data.pocket.network observed supplier pagination did not complete");

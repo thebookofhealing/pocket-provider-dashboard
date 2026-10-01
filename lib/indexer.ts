@@ -168,6 +168,10 @@ export function advanceObservedSupplierCursor(
   return { done: false, cursor };
 }
 
+export function isClientShareRefreshDue(now: number, lastAttemptAt: number, intervalMs: number): boolean {
+  return lastAttemptAt === 0 || now - lastAttemptAt >= intervalMs;
+}
+
 type RewardDistributionDetail = {
   op_reason: string;
   amount: string;
@@ -303,6 +307,7 @@ let liveCatchupInFlight = false;
 let lastSessionSyncAt = 0;
 let lastStakingRefreshAt = 0;
 let lastClientShareRefreshAt = 0;
+let lastClientShareRefreshAttemptAt = 0;
 let clientShareRefreshInFlight: Promise<void> | null = null;
 const SESSION_SYNC_INTERVAL_MS = 60 * 60 * 1000;
 const SESSION_FRESHNESS_MS = 60 * 60 * 1000;
@@ -313,11 +318,13 @@ let knownServiceIds = new Set<string>();
 
 async function maybeRefreshStakingSnapshot(force = false): Promise<void> {
   if (!force && Date.now() - lastStakingRefreshAt < STAKING_REFRESH_INTERVAL_MS) return;
-  const clientShareRefreshDue = force || Date.now() - lastClientShareRefreshAt >= STAKING_CLIENT_SHARE_REFRESH_INTERVAL_MS;
+  const clientShareRefreshDue = force || isClientShareRefreshDue(Date.now(), lastClientShareRefreshAttemptAt, STAKING_CLIENT_SHARE_REFRESH_INTERVAL_MS);
   if (clientShareRefreshDue && !clientShareRefreshInFlight) {
+    const pagination = { pageCount: 0, rowCount: 0, startedAt: Date.now() };
+    lastClientShareRefreshAttemptAt = pagination.startedAt;
     clientShareRefreshInFlight = (async () => {
       try {
-        const observedShares = await fetchObservedClientShares();
+        const observedShares = await fetchObservedClientShares(pagination);
         lastClientShareRefreshAt = Date.now();
         logInfo("Observed PocketDex client shares refreshed", { providerCount: Object.keys(observedShares).length });
         // Apply the completed observation separately; the 15-minute reward
@@ -330,6 +337,9 @@ async function maybeRefreshStakingSnapshot(force = false): Promise<void> {
           status: "failed",
           failedAt: new Date().toISOString(),
           error: error instanceof Error ? error.message : String(error),
+          pageCount: pagination.pageCount,
+          rowCount: pagination.rowCount,
+          durationMs: Date.now() - pagination.startedAt,
           filter: "canonical provider domains and endpoint URLs"
         }));
         logWarn("PocketDex client-share refresh failed; retaining observed LKG", { error: error instanceof Error ? error.message : String(error) });
@@ -894,14 +904,13 @@ function supplierConfigDomain(node: { domains?: unknown; endpoints?: unknown }):
   return knownAlias ?? normalized[0] ?? null;
 }
 
-async function fetchObservedClientShares(): Promise<ObservedClientShares> {
+type ClientSharePaginationDiagnostics = { pageCount: number; rowCount: number; startedAt: number };
+
+async function fetchObservedClientShares(pagination: ClientSharePaginationDiagnostics = { pageCount: 0, rowCount: 0, startedAt: Date.now() }): Promise<ObservedClientShares> {
   const inputs: ObservedClientShareInput[] = [];
   let after: string | null = null;
   const filter = observedSupplierConfigFilter();
   const seenCursors = new Set<string>();
-  let pageCount = 0;
-  let rowCount = 0;
-  const startedAt = Date.now();
   while (true) {
     const response: PoktscanObservedSupplierConfigsResponse = await fetchJson<PoktscanObservedSupplierConfigsResponse>(POKTSCAN_URL, ELIGIBLE_SUPPLIER_TIMEOUT_MS, {
       method: "POST",
@@ -910,8 +919,8 @@ async function fetchObservedClientShares(): Promise<ObservedClientShares> {
     });
     const connection: NonNullable<PoktscanObservedSupplierConfigsResponse["data"]>["supplierServiceConfigs"] = response.data?.supplierServiceConfigs;
     if (!connection) throw new Error("data.pocket.network returned no supplier service config connection");
-    pageCount += 1;
-    rowCount += connection.nodes?.length ?? 0;
+    pagination.pageCount += 1;
+    pagination.rowCount += connection.nodes?.length ?? 0;
     for (const node of connection.nodes ?? []) {
       if (!node?.serviceId || !node.supplier?.ownerId) continue;
       const providerDomain = supplierConfigDomain(node);
@@ -941,13 +950,13 @@ async function fetchObservedClientShares(): Promise<ObservedClientShares> {
       const observedShares = deriveObservedClientShares(inputs, new Date().toISOString());
       setIndexerState("staking_client_share_pagination", JSON.stringify({
         status: "complete",
-        pageCount,
-        rowCount,
-        durationMs: Date.now() - startedAt,
+        pageCount: pagination.pageCount,
+        rowCount: pagination.rowCount,
+        durationMs: Date.now() - pagination.startedAt,
         completedAt: new Date().toISOString(),
         filter: "canonical provider domains and endpoint URLs"
       }));
-      logInfo("PocketDex client-share pagination completed", { pageCount, rowCount, durationMs: Date.now() - startedAt });
+      logInfo("PocketDex client-share pagination completed", { pageCount: pagination.pageCount, rowCount: pagination.rowCount, durationMs: Date.now() - pagination.startedAt });
       return observedShares;
     }
     after = nextCursor.cursor;

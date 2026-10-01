@@ -219,6 +219,14 @@ const observedUniform = deriveObservedClientShares([
 assert.equal(observedUniform["fixture.example"]?.status, "uniform", "uniform owner revShare is classified as uniform");
 assert.equal(observedUniform["fixture.example"]?.uniformValue, 55, "the matching owner address is selected");
 assert.deepEqual(observedUniform["fixture.example"]?.byService, { alpha: [55], beta: [55] }, "inactive configs are excluded and provider recipients are not selected");
+assert.equal(observedUniform["fixture.example"]?.activeConfigCount, 2, "active provider config count is retained for diagnostics");
+assert.equal(observedUniform["fixture.example"]?.ownerRevShareMatchCount, 2, "owner-address rev-share matches are retained for diagnostics");
+const unmatchedClientShare = deriveObservedClientShares([
+  { providerDomain: "easy2stake.com", serviceId: "alpha", supplierOwnerAddress: "owner-a", active: true, revShare: [{ address: "other", revSharePercentage: "50" }] }
+], observedAt);
+assert.equal(unmatchedClientShare.easy2stake?.status, "unavailable", "active configs without owner rev-share matches remain explicitly unavailable");
+assert.equal(unmatchedClientShare.easy2stake?.activeConfigCount, 1, "unmatched provider diagnostics retain the active config count");
+assert.equal(unmatchedClientShare.easy2stake?.ownerRevShareMatchCount, 0, "unmatched provider diagnostics retain the zero owner match count");
 const canonicalAliasShares = deriveObservedClientShares([
   { providerDomain: "api.kleomedes.network", serviceId: "alpha", supplierOwnerAddress: "owner-a", active: true, revShare: [{ address: "owner-a", revSharePercentage: "51" }] },
   { providerDomain: "kleomedes.cloud", serviceId: "beta", supplierOwnerAddress: "owner-b", active: true, revShare: [{ address: "owner-b", revSharePercentage: "51" }] },
@@ -234,6 +242,30 @@ const selectedRewardProbe = stakingTesting.chooseRewardDomainProbe([
   { domain: "kleomedes.cloud", services: [{ gross_rewards: "999", staked_suppliers: 1 }] }
 ]);
 assert.equal(selectedRewardProbe.sourceDomain, "kleomedes.network", "reward alias resolution selects one verified nonempty domain without double-counting");
+const invalidFirstProbe = stakingTesting.chooseRewardDomainProbe([
+  { domain: "easy2stake.com", services: [{ gross_rewards: "not-a-number", staked_suppliers: 0 }] },
+  { domain: "easy2stake.net", services: [{ gross_rewards: "100", staked_suppliers: 1 }] }
+]);
+assert.equal(invalidFirstProbe.sourceDomain, "easy2stake.net", "reward alias resolution skips nonempty domains with no usable reward rows");
+const mixedValiditySnapshot = stakingTesting.buildLivePlans(
+  snapshotSource,
+  new Map([["fixture.example", [
+    { gross_rewards: "300000000", staked_suppliers: 1 },
+    { gross_rewards: "malformed", staked_suppliers: 0 }
+  ]]]),
+  59_500,
+  new Date("2026-09-22T12:00:00.000Z"),
+  [fixtureMetadata[0]]
+);
+assert.equal(mixedValiditySnapshot.plans.length, 1, "one malformed reward row does not poison an otherwise usable provider");
+assert.match(mixedValiditySnapshot.plans[0]?.diagnosticReason ?? "", /ignored 1 invalid reward service row/, "malformed reward rows are surfaced in provider diagnostics");
+assert.throws(() => stakingTesting.buildLivePlans(
+  snapshotSource,
+  new Map([["fixture.example", [{ gross_rewards: "malformed", staked_suppliers: 0 }]]]),
+  59_500,
+  new Date("2026-09-22T12:00:00.000Z"),
+  [fixtureMetadata[0]]
+), /no configured public provider plans/, "a provider with no usable reward rows remains unavailable");
 const observedVariable = deriveObservedClientShares([
   { providerDomain: "fixture.example", serviceId: "alpha", supplierOwnerAddress: "owner-a", active: true, revShare: [{ address: "owner-a", rev_share_percentage: "50" }] },
   { providerDomain: "fixture.example", serviceId: "beta", supplierOwnerAddress: "owner-b", active: true, revShare: [{ address: "owner-b", revSharePercentage: "70" }] }

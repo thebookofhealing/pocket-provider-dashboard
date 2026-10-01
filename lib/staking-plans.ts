@@ -33,6 +33,8 @@ export type ObservedClientShare = {
   uniformValue: number | null;
   source: ObservedClientShareSource;
   observedAt: string | null;
+  activeConfigCount?: number;
+  ownerRevShareMatchCount?: number;
   byService?: Record<string, number[]>;
 };
 
@@ -142,11 +144,11 @@ const PLAN_METADATA: ProviderPlanMetadata[] = STAKING_PROVIDER_IDENTITIES.map((i
 });
 
 function configuredClientShareObservation(clientShare: number, observedAt: string | null): ObservedClientShare {
-  return { status: "uniform", min: clientShare, max: clientShare, uniformValue: clientShare, source: "configured-fallback", observedAt };
+  return { status: "uniform", min: clientShare, max: clientShare, uniformValue: clientShare, source: "configured-fallback", observedAt, activeConfigCount: 0, ownerRevShareMatchCount: 0 };
 }
 
 function unavailableClientShareObservation(observedAt: string | null): ObservedClientShare {
-  return { status: "unavailable", min: null, max: null, uniformValue: null, source: "pocketdex-onchain", observedAt };
+  return { status: "unavailable", min: null, max: null, uniformValue: null, source: "pocketdex-onchain", observedAt, activeConfigCount: 0, ownerRevShareMatchCount: 0 };
 }
 
 function parseRevShareEntries(value: unknown): Array<{ address: string; percentage: number }> {
@@ -164,6 +166,7 @@ function parseRevShareEntries(value: unknown): Array<{ address: string; percenta
 /** Aggregates active PocketDex supplier configs by provider domain. */
 export function deriveObservedClientShares(inputs: ObservedClientShareInput[], observedAt: string | null): ObservedClientShares {
   const byProvider = new Map<string, Map<string, number[]>>();
+  const providerCounts = new Map<string, { activeConfigCount: number; ownerRevShareMatchCount: number }>();
   for (const input of inputs) {
     if (!input.active || !input.providerDomain || !input.supplierOwnerAddress) continue;
     const identity = resolveStakingProviderIdentity({
@@ -175,29 +178,35 @@ export function deriveObservedClientShares(inputs: ObservedClientShareInput[], o
     // diagnostics and fixture compatibility, but never guessed into a known
     // provider identity.
     const providerKey = identity?.id ?? normalizeProviderDomain(input.providerDomain) ?? input.providerDomain;
+    const counts = providerCounts.get(providerKey) ?? { activeConfigCount: 0, ownerRevShareMatchCount: 0 };
+    counts.activeConfigCount += 1;
+    providerCounts.set(providerKey, counts);
+    const services = byProvider.get(providerKey) ?? new Map<string, number[]>();
+    byProvider.set(providerKey, services);
     const owner = input.supplierOwnerAddress.toLowerCase();
     const ownerShare = parseRevShareEntries(input.revShare).find((entry) => entry.address === owner)?.percentage;
     if (ownerShare == null) continue;
-    const services = byProvider.get(providerKey) ?? new Map<string, number[]>();
+    counts.ownerRevShareMatchCount += 1;
     const values = services.get(input.serviceId) ?? [];
     values.push(ownerShare);
     services.set(input.serviceId, values);
-    byProvider.set(providerKey, services);
   }
 
   return Object.fromEntries(Array.from(byProvider.entries()).map(([domain, services]) => {
     const byService = Object.fromEntries(Array.from(services.entries()).map(([serviceId, values]) => [serviceId, values]));
     const allValues = Object.values(byService).flat();
-    const min = Math.min(...allValues);
-    const max = Math.max(...allValues);
-    const uniform = max - min <= 0.05;
+    const min = allValues.length > 0 ? Math.min(...allValues) : null;
+    const max = allValues.length > 0 ? Math.max(...allValues) : null;
+    const uniform = min != null && max != null && max - min <= 0.05;
     return [domain, {
-      status: uniform ? "uniform" : "variable",
+      status: allValues.length === 0 ? "unavailable" : uniform ? "uniform" : "variable",
       min,
       max,
-      uniformValue: uniform ? allValues[0] : null,
+      uniformValue: uniform ? allValues[0] ?? null : null,
       source: "pocketdex-onchain",
       observedAt,
+      activeConfigCount: providerCounts.get(domain)?.activeConfigCount ?? 0,
+      ownerRevShareMatchCount: providerCounts.get(domain)?.ownerRevShareMatchCount ?? 0,
       byService
     } satisfies ObservedClientShare];
   }));
@@ -303,6 +312,8 @@ function parseClientShareObservation(value: unknown, fallbackShare: number, fall
     uniformValue: typeof observation.uniformValue === "number" ? observation.uniformValue : null,
     source: observation.source as ObservedClientShareSource,
     observedAt: observation.observedAt ?? null,
+    activeConfigCount: typeof observation.activeConfigCount === "number" ? observation.activeConfigCount : 0,
+    ownerRevShareMatchCount: typeof observation.ownerRevShareMatchCount === "number" ? observation.ownerRevShareMatchCount : 0,
     byService: observation.byService
   };
 }
@@ -434,6 +445,8 @@ export function getStakingDiagnostics(): {
     clientShareStatus: ObservedClientShareStatus;
     clientShareSource: ObservedClientShareSource;
     clientShareObservedAt: string | null;
+    activeConfigCount: number;
+    ownerRevShareMatchCount: number;
     reason: string | null;
   }>;
 } {
@@ -462,6 +475,8 @@ export function getStakingDiagnostics(): {
       clientShareStatus: plan.clientShareObservation.status,
       clientShareSource: plan.clientShareObservation.source,
       clientShareObservedAt: plan.clientShareObservation.observedAt,
+      activeConfigCount: plan.clientShareObservation.activeConfigCount ?? 0,
+      ownerRevShareMatchCount: plan.clientShareObservation.ownerRevShareMatchCount ?? 0,
       reason: plan.diagnosticReason ?? null
     }))
   };
@@ -529,10 +544,37 @@ function deriveClientShareEconomics(
 
 /** Select exactly one verified reward-domain result; aliases are never summed. */
 export function chooseRewardDomainProbe(probes: RewardDomainProbe[]): RewardEntry {
-  const usable = probes.find((probe) => probe.services.length > 0);
+  const usable = probes.find((probe) => probe.services.some((service) => {
+    const gross = toNumber(service.gross_rewards);
+    const suppliers = toNumber(service.staked_suppliers);
+    return gross != null && gross >= 0 && suppliers != null && suppliers > 0;
+  }));
   if (usable) return { services: usable.services, sourceDomain: usable.domain };
   const errors = probes.filter((probe) => probe.error).map((probe) => `${probe.domain}: ${probe.error}`);
   return { services: [], error: errors.join("; ") || "provider reward query returned no usable services" };
+}
+
+function aggregateGrossSevenDayPerSupplier(
+  services: IgniterRewardService[],
+  supplierAllocation: number
+): { grossSevenDayPerSupplierUpokt: number; invalidServiceCount: number } | null {
+  let grossSevenDayPerSupplierUpokt = 0;
+  let usableServiceCount = 0;
+  let invalidServiceCount = 0;
+  for (const service of services) {
+    const gross = toNumber(service.gross_rewards);
+    const suppliers = toNumber(service.staked_suppliers);
+    if (gross == null || gross < 0 || suppliers == null || suppliers <= 0) {
+      invalidServiceCount += 1;
+      continue;
+    }
+    // This mirrors Igniter's address-group workflow: supplier allocation is
+    // applied to gross rewards before dividing by the service's live supplier
+    // count, then the UI divides the seven-day total by seven.
+    grossSevenDayPerSupplierUpokt += Math.floor(gross * supplierAllocation) / suppliers;
+    usableServiceCount += 1;
+  }
+  return usableServiceCount > 0 ? { grossSevenDayPerSupplierUpokt, invalidServiceCount } : null;
 }
 
 async function fetchMinimumSupplierStake(): Promise<number> {
@@ -568,16 +610,9 @@ export function buildLivePlans(
   const plans = metadata.map((planMetadata): PublicPlan | null => {
     const services = rewardsByDomain.get(planMetadata.identityId ?? planMetadata.domain) ?? rewardsByDomain.get(planMetadata.domain);
     if (!services || services.length === 0) return null;
-    let grossSevenDayPerSupplierUpokt = 0;
-    for (const service of services) {
-      const gross = toNumber(service.gross_rewards);
-      const suppliers = toNumber(service.staked_suppliers);
-      if (gross == null || suppliers == null || suppliers <= 0) return null;
-      // This mirrors Igniter's address-group workflow: supplier allocation is
-      // applied to gross rewards before dividing by the service's live
-      // supplier count, then the UI divides the seven-day total by seven.
-      grossSevenDayPerSupplierUpokt += Math.floor(gross * supplierAllocation) / suppliers;
-    }
+    const aggregate = aggregateGrossSevenDayPerSupplier(services, supplierAllocation);
+    if (!aggregate) return null;
+    const { grossSevenDayPerSupplierUpokt, invalidServiceCount } = aggregate;
     const observation = observationForPlan(planMetadata, observedShares);
     const derived = deriveClientShareEconomics(grossSevenDayPerSupplierUpokt, planMetadata, observation, minimumStake);
     if (!derived) return null;
@@ -592,7 +627,8 @@ export function buildLivePlans(
       valueSource: isSourceFresh(sourceUpdatedAt, now.getTime(), REFRESH_INTERVAL_MS) ? "live-derived" : "stale-derived",
       sourceUpdatedAt,
       fetchedAt: now.toISOString(),
-      clientShareObservation: observation
+      clientShareObservation: observation,
+      ...(invalidServiceCount > 0 ? { diagnosticReason: `ignored ${invalidServiceCount} invalid reward service row${invalidServiceCount === 1 ? "" : "s"}` } : {})
     };
   }).filter((plan): plan is PublicPlan => plan !== null)
     .filter((plan) => plan.apr > MINIMUM_DISPLAY_APR)
@@ -639,13 +675,9 @@ function deriveProviderPlan(
   observedShares?: ObservedClientShares,
   previousObservation?: ObservedClientShare
 ): PublicPlan | null {
-  let grossSevenDayPerSupplierUpokt = 0;
-  for (const service of services) {
-    const gross = toNumber(service.gross_rewards);
-    const suppliers = toNumber(service.staked_suppliers);
-    if (gross == null || suppliers == null || suppliers <= 0) return null;
-    grossSevenDayPerSupplierUpokt += Math.floor(gross * supplierAllocation) / suppliers;
-  }
+  const aggregate = aggregateGrossSevenDayPerSupplier(services, supplierAllocation);
+  if (!aggregate) return null;
+  const { grossSevenDayPerSupplierUpokt, invalidServiceCount } = aggregate;
   const observation = observationForPlan(metadata, observedShares, previousObservation);
   const derived = deriveClientShareEconomics(grossSevenDayPerSupplierUpokt, metadata, observation, minimumStake);
   if (!derived) return null;
@@ -660,7 +692,8 @@ function deriveProviderPlan(
     valueSource: sourceFresh ? "live-derived" : "stale-derived",
     sourceUpdatedAt,
     fetchedAt: now.toISOString(),
-    clientShareObservation: observation
+    clientShareObservation: observation,
+    ...(invalidServiceCount > 0 ? { diagnosticReason: `ignored ${invalidServiceCount} invalid reward service row${invalidServiceCount === 1 ? "" : "s"}` } : {})
   };
 }
 

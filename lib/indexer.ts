@@ -871,9 +871,19 @@ async function fetchObservedClientShares(): Promise<ObservedClientShares> {
       const providerOverride = SUPPLIER_PROVIDER_OVERRIDES[node.supplier.operatorId ?? ""]?.providerKey
         ?? SUPPLIER_PROVIDER_OVERRIDES[node.supplier.ownerId]?.providerKey
         ?? null;
+      const overrideRecord = (node.supplier.operatorId ? SUPPLIER_PROVIDER_OVERRIDES[node.supplier.operatorId] : undefined)
+        ?? SUPPLIER_PROVIDER_OVERRIDES[node.supplier.ownerId];
+      // The public GraphQL supplier config does not expose a provider label.
+      // Join the normalized domain to the canonical local registry so the
+      // approved provider-name fallback is exercised in the live ingestion
+      // path, while explicit override labels retain priority.
+      const providerName = overrideRecord?.providerLabel
+        ?? resolveStakingProviderIdentity({ domain: providerDomain })?.provider
+        ?? null;
       inputs.push({
         providerDomain,
         providerOverride,
+        providerName,
         serviceId: node.serviceId,
         supplierOwnerAddress: node.supplier.ownerId,
         active: (node.supplier.stakeStatus ?? "").toLowerCase() === "staked",

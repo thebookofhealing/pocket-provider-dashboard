@@ -50,6 +50,8 @@ import { aggregateEligibleSupplierCounts, parseEligibleSupplierSnapshot, type El
 import { resolveEligibleSupplierCounts, type EligibleSupplierCountsSnapshot } from "@/lib/eligible-supplier-source";
 import { ELIGIBLE_SUPPLIER_SNAPSHOT_SCHEMA_VERSION, DASHBOARD_CACHE_SCHEMA_VERSION, hasStructurallyServableDashboard } from "@/lib/cache-contract";
 import { deriveObservedClientShares, ensureStakingSnapshotV3, refreshStakingSnapshot, type ObservedClientShareInput, type ObservedClientShares } from "@/lib/staking-plans";
+import { SUPPLIER_PROVIDER_OVERRIDES } from "@/lib/provider-overrides";
+import { resolveStakingProviderIdentity } from "@/lib/staking-provider-identity";
 
 type RpcEvent = {
   type: string;
@@ -267,7 +269,6 @@ const MIGRATION_RETRY_DELAY_MS = 5000;
 const WINDOWS: TimeWindow[] = ["24h", "7d", "30d"];
 const SETTLEMENT_EVENT_TYPE = "pocket.tokenomics.EventClaimSettled";
 const SECOND_LEVEL_SUFFIXES = new Set(["co.uk", "org.uk", "com.au", "net.au", "co.jp", "com.br"]);
-const STAKING_PROVIDER_DOMAINS = new Set(["kleomedes.cloud", "kalorius.tech", "nodefleet.net", "purroofgroup.com", "easy2stake.com"]);
 const SUPPLIER_REWARD_REASONS = new Set([
   "TLM_RELAY_BURN_EQUALS_MINT_SUPPLIER_SHAREHOLDER_REWARD_DISTRIBUTION",
   "TLM_GLOBAL_MINT_SUPPLIER_SHAREHOLDER_REWARD_DISTRIBUTION"
@@ -848,9 +849,8 @@ function supplierConfigDomain(node: { domains?: unknown; endpoints?: unknown }):
     const hostname = getHostname(candidate.includes("://") ? candidate : `https://${candidate}`);
     return hostname ? [getRegistrableDomain(hostname)] : [];
   });
-  const knownProviderDomain = normalized.find((domain) => STAKING_PROVIDER_DOMAINS.has(domain));
-  if (knownProviderDomain) return knownProviderDomain;
-  return normalized[0] ?? null;
+  const knownAlias = normalized.find((domain) => resolveStakingProviderIdentity({ domain }));
+  return knownAlias ?? normalized[0] ?? null;
 }
 
 async function fetchObservedClientShares(): Promise<ObservedClientShares> {
@@ -868,8 +868,12 @@ async function fetchObservedClientShares(): Promise<ObservedClientShares> {
       if (!node?.serviceId || !node.supplier?.ownerId) continue;
       const providerDomain = supplierConfigDomain(node);
       if (!providerDomain) continue;
+      const providerOverride = SUPPLIER_PROVIDER_OVERRIDES[node.supplier.operatorId ?? ""]?.providerKey
+        ?? SUPPLIER_PROVIDER_OVERRIDES[node.supplier.ownerId]?.providerKey
+        ?? null;
       inputs.push({
         providerDomain,
+        providerOverride,
         serviceId: node.serviceId,
         supplierOwnerAddress: node.supplier.ownerId,
         active: (node.supplier.stakeStatus ?? "").toLowerCase() === "staked",

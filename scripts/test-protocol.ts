@@ -219,6 +219,21 @@ const observedUniform = deriveObservedClientShares([
 assert.equal(observedUniform["fixture.example"]?.status, "uniform", "uniform owner revShare is classified as uniform");
 assert.equal(observedUniform["fixture.example"]?.uniformValue, 55, "the matching owner address is selected");
 assert.deepEqual(observedUniform["fixture.example"]?.byService, { alpha: [55], beta: [55] }, "inactive configs are excluded and provider recipients are not selected");
+const canonicalAliasShares = deriveObservedClientShares([
+  { providerDomain: "api.kleomedes.network", serviceId: "alpha", supplierOwnerAddress: "owner-a", active: true, revShare: [{ address: "owner-a", revSharePercentage: "51" }] },
+  { providerDomain: "kleomedes.cloud", serviceId: "beta", supplierOwnerAddress: "owner-b", active: true, revShare: [{ address: "owner-b", revSharePercentage: "51" }] },
+  { providerDomain: "unknown.example", providerName: "Kleomedes α", serviceId: "gamma", supplierOwnerAddress: "owner-c", active: true, revShare: [{ address: "owner-c", revSharePercentage: "51" }] }
+], observedAt);
+assert.equal(canonicalAliasShares.kleomedes?.uniformValue, 51, "Kleomedes network/cloud/name aliases share one canonical client-share identity");
+assert.equal(stakingTesting.resolveStakingProviderIdentity({ domain: "foo.kleomedes.network" })?.id, "kleomedes", "subdomains resolve through the exact registrable-domain alias");
+assert.equal(stakingTesting.resolveStakingProviderIdentity({ providerName: "Kleomedes α" })?.id, "kleomedes", "provider display-name aliases resolve canonically");
+assert.equal(stakingTesting.resolveStakingProviderIdentity({ providerOverride: "kleomedes", domain: "unknown.example" })?.id, "kleomedes", "explicit supplier overrides take precedence over endpoint domains");
+assert.equal(stakingTesting.resolveStakingProviderIdentity({ providerName: "network" }), null, "weak provider fragments remain unresolved");
+const selectedRewardProbe = stakingTesting.chooseRewardDomainProbe([
+  { domain: "kleomedes.network", services: [{ gross_rewards: "100", staked_suppliers: 1 }] },
+  { domain: "kleomedes.cloud", services: [{ gross_rewards: "999", staked_suppliers: 1 }] }
+]);
+assert.equal(selectedRewardProbe.sourceDomain, "kleomedes.network", "reward alias resolution selects one verified nonempty domain without double-counting");
 const observedVariable = deriveObservedClientShares([
   { providerDomain: "fixture.example", serviceId: "alpha", supplierOwnerAddress: "owner-a", active: true, revShare: [{ address: "owner-a", rev_share_percentage: "50" }] },
   { providerDomain: "fixture.example", serviceId: "beta", supplierOwnerAddress: "owner-b", active: true, revShare: [{ address: "owner-b", revSharePercentage: "70" }] }
@@ -229,6 +244,10 @@ const observedEconomics = stakingTesting.buildLivePlans(snapshotSource, rewardFi
 assert.equal(observedEconomics.plans.find((plan) => plan.id === "fixture")?.clientShare, 55, "uniform observed share drives APR economics");
 assert.equal(observedEconomics.plans.find((plan) => plan.id === "fixture")?.clientShareObservation.source, "pocketdex-onchain", "observed share provenance is persisted");
 assert.equal(observedEconomics.plans.find((plan) => plan.id === "fixture")?.aprMin, undefined, "uniform observed share keeps a single APR");
+const canonicalPlanMetadata = [{ ...fixtureMetadata[0], id: "kleomedes-public", identityId: "kleomedes", domain: "kleomedes.network" }];
+const canonicalPlanRewards = new Map([["kleomedes", rewardFixture.get("fixture.example") ?? []]]);
+const canonicalEconomics = stakingTesting.buildLivePlans(snapshotSource, canonicalPlanRewards, 59_500, new Date("2026-09-22T12:00:00.000Z"), canonicalPlanMetadata, canonicalAliasShares);
+assert.equal(canonicalEconomics.plans[0]?.clientShare, 51, "canonical provider client-share observation feeds the matching public plan across domain aliases");
 const variableEconomics = stakingTesting.buildLivePlans(snapshotSource, rewardFixture, 59_500, new Date("2026-09-22T12:00:00.000Z"), fixtureMetadata, observedVariable);
 assert.equal(variableEconomics.plans.find((plan) => plan.id === "fixture")?.clientShareObservation.status, "variable", "variable observed shares are retained for display");
 const variablePlan = variableEconomics.plans.find((plan) => plan.id === "fixture")!;

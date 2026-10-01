@@ -1,6 +1,6 @@
 import { derivePlanEconomics, isSourceFresh, normalizeSourceTimestamp } from "@/lib/staking-economics";
 import { getMeta, isDatabaseReadOnly, setMeta } from "@/lib/db";
-import { resolveStakingProviderIdentity, STAKING_PROVIDER_IDENTITIES } from "@/lib/staking-provider-identity";
+import { normalizeProviderDomain, resolveStakingProviderIdentity, STAKING_PROVIDER_IDENTITIES } from "@/lib/staking-provider-identity";
 
 export const DEFAULT_POKT_PER_SUPPLIER = 59_500;
 export const MINIMUM_DISPLAY_APR = 10;
@@ -174,7 +174,7 @@ export function deriveObservedClientShares(inputs: ObservedClientShareInput[], o
     // Unknown domains are retained under their normalized exact domain for
     // diagnostics and fixture compatibility, but never guessed into a known
     // provider identity.
-    const providerKey = identity?.id ?? input.providerDomain;
+    const providerKey = identity?.id ?? normalizeProviderDomain(input.providerDomain) ?? input.providerDomain;
     const owner = input.supplierOwnerAddress.toLowerCase();
     const ownerShare = parseRevShareEntries(input.revShare).find((entry) => entry.address === owner)?.percentage;
     if (ownerShare == null) continue;

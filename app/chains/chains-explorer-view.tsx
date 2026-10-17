@@ -6,6 +6,7 @@ import { useMemo, useState, useEffect } from "react";
 import { formatCompactNumber, formatCompactUpokt, formatDecimal, formatInteger, formatUsd, formatUpokt } from "@/lib/format";
 import { rankDemandSignals, SESSION_SUPPLIER_SLOTS } from "@/lib/opportunities";
 import type { SerializedDashboardData, SerializedServiceStats } from "@/lib/types";
+import ThemedSelect from "@/app/themed-select";
 
 type SortKey = "service" | "revenue" | "relays" | "computeUnits" | "providers" | "suppliers" | "revenuePerProvider" | "opportunity";
 type SortDirection = "asc" | "desc";
@@ -44,6 +45,8 @@ type IndexerHealthResponse = {
     lagReliable?: boolean;
   };
 };
+
+type IndexerStatus = "synced" | "stale" | "unknown";
 
 const INDEXER_SYNC_LAG_THRESHOLD = 15;
 const INDEXER_HEALTH_REFRESH_MS = 30_000;
@@ -107,7 +110,7 @@ export default function ChainsExplorerView({ data }: ChainsExplorerViewProps) {
       ? Math.max(0, data.indexerTargetHeight - data.indexerProcessedHeight)
       : null
   );
-  const [healthReportsStale, setHealthReportsStale] = useState(true);
+  const [indexerStatus, setIndexerStatus] = useState<IndexerStatus>("unknown");
   const demandSignalRanks = useMemo(
     () => rankDemandSignals(data?.services ?? [], data?.suppliersPerSession ?? SESSION_SUPPLIER_SLOTS),
     [data?.services, data?.suppliersPerSession]
@@ -177,12 +180,19 @@ export default function ChainsExplorerView({ data }: ChainsExplorerViewProps) {
         const lag = health.indexer?.lag;
         if (!active) return;
 
-        setIndexerLag(typeof lag === "number" && Number.isFinite(lag) ? Math.max(0, lag) : null);
-        setHealthReportsStale(health.indexer?.stale === true || health.indexer?.lagReliable !== true);
+        const normalizedLag = typeof lag === "number" && Number.isFinite(lag) ? Math.max(0, lag) : null;
+        setIndexerLag(normalizedLag);
+        if (normalizedLag == null || health.indexer?.lagReliable !== true) {
+          setIndexerStatus("unknown");
+        } else if (health.indexer.stale === true || normalizedLag >= INDEXER_SYNC_LAG_THRESHOLD) {
+          setIndexerStatus("stale");
+        } else {
+          setIndexerStatus("synced");
+        }
       } catch {
         if (!active) return;
         setIndexerLag(null);
-        setHealthReportsStale(true);
+        setIndexerStatus("unknown");
       }
     }
 
@@ -208,7 +218,18 @@ export default function ChainsExplorerView({ data }: ChainsExplorerViewProps) {
   }
 
   const cuCoverageComplete = (data.computeUnitCoverage ?? 0) >= 1;
-  const indexerSynced = indexerLag != null && indexerLag < INDEXER_SYNC_LAG_THRESHOLD && !healthReportsStale;
+  const indexerSynced = indexerStatus === "synced";
+  const indexerStale = indexerStatus === "stale";
+  const indexerStatusLabel = indexerSynced
+    ? "Synced to Latest Block Height"
+    : indexerStale
+      ? "Catching Up"
+      : "Health Unavailable";
+  const indexerStatusTooltip = indexerStatus === "unknown"
+    ? "Indexer health is unavailable or its lag cannot be verified."
+    : indexerLag == null
+      ? "Indexer lag is unavailable."
+      : `Indexer lag: ${formatInteger(indexerLag)} blocks`;
 
   return (
     <main className="page explorer-page">
@@ -257,14 +278,14 @@ export default function ChainsExplorerView({ data }: ChainsExplorerViewProps) {
         <div className="section-title-row">
           <div>
             <h2 className="section-title">Analyze traffic across chains to identify the best revenue opportunities.</h2>
-            <p className="section-subtitle">Pocket routes traffic in sessions. For each app and chain, the protocol selects up to 50 eligible suppliers; fewer competing suppliers means a better chance your suppliers are included. Once selected, faster and more reliable suppliers tend to receive more traffic. The Demand Signal estimates which chains offer the strongest revenue opportunity for a new provider with 15 suppliers.</p>
+            <p className="section-subtitle">Pocket routes data requests from applications to providers during 15 minute sessions. The protocol selects 50 eligible suppliers for each session; fewer competing suppliers means a better chance your suppliers are included in the session. Once selected, faster and more reliable suppliers tend to receive more traffic. The Demand Signal estimates which chains offer the strongest revenue opportunity for a new provider assuming they have at least 15 suppliers.</p>
           </div>
           <span
-            className={`pill indexer-status-pill ${indexerSynced ? "is-synced" : "is-stale"}`}
+            className={`pill indexer-status-pill ${indexerSynced ? "is-synced" : indexerStale ? "is-stale" : "is-unknown"}`}
             aria-live="polite"
-            title={indexerLag == null ? "Indexer lag is unavailable" : `Indexer lag: ${formatInteger(indexerLag)} blocks`}
+            title={indexerStatusTooltip}
           >
-            {indexerSynced ? "Synced to Latest Block Height" : "Stale Data"}
+            {indexerStatusLabel}
           </span>
         </div>
 
@@ -290,16 +311,21 @@ export default function ChainsExplorerView({ data }: ChainsExplorerViewProps) {
           
           <div className="explorer-select">
             <span className="hero-highlight-label">Sort Objective</span>
-            <select value={sort} onChange={(event) => updateSort(event.target.value as SortKey, SORT_COLUMNS.find((entry) => entry.key === event.target.value)?.defaultDirection ?? "desc")}>
-              <option value="service">Service Identity</option>
-              <option value="opportunity">Demand Signal (experimental)</option>
-              <option value="revenue">Total Revenue</option>
-              <option value="relays">Relay Volume</option>
-              <option value="providers">Domain Density</option>
-              <option value="revenuePerProvider">Avg Domain Reward</option>
-              <option value="computeUnits">Compute Units</option>
-              <option value="suppliers">Supplier Count</option>
-            </select>
+            <ThemedSelect
+              value={sort}
+              aria-label="Sort Objective"
+              options={[
+                { value: "service", label: "Service Identity" },
+                { value: "opportunity", label: "Demand Signal (experimental)" },
+                { value: "revenue", label: "Total Revenue" },
+                { value: "relays", label: "Relay Volume" },
+                { value: "providers", label: "Domain Density" },
+                { value: "revenuePerProvider", label: "Avg Domain Reward" },
+                { value: "computeUnits", label: "Compute Units" },
+                { value: "suppliers", label: "Supplier Count" },
+              ]}
+              onChange={(nextSort) => updateSort(nextSort as SortKey, SORT_COLUMNS.find((entry) => entry.key === nextSort)?.defaultDirection ?? "desc")}
+            />
           </div>
         </div>
 
@@ -390,9 +416,12 @@ export default function ChainsExplorerView({ data }: ChainsExplorerViewProps) {
             <button type="button" className="explorer-page-button" disabled={page >= pageCount} onClick={() => setPage((p) => Math.min(pageCount, p + 1))}>Next</button>
             <label className="explorer-page-size">
               <span>Rows per page</span>
-              <select value={pageSize} onChange={(event) => handlePageSizeChange(Number(event.target.value))}>
-                {PAGE_SIZE_OPTIONS.map((size) => <option key={size} value={size}>{size}</option>)}
-              </select>
+              <ThemedSelect
+                value={String(pageSize)}
+                aria-label="Rows per page"
+                options={PAGE_SIZE_OPTIONS.map((size) => ({ value: String(size), label: String(size) }))}
+                onChange={(nextSize) => handlePageSizeChange(Number(nextSize))}
+              />
             </label>
           </div>
         </div>

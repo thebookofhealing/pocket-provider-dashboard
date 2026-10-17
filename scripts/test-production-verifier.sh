@@ -61,6 +61,19 @@ assert "maybeRefreshStakingSnapshot()" in source[repair_start:repair_end], "repa
 print("Staking/dashboard refresh decoupling checks passed")
 PY
 
+python3 - "$indexer_script" <<'PY'
+import sys
+from pathlib import Path
+source = Path(sys.argv[1]).read_text(encoding="utf-8")
+start = source.index("async function maybeRefreshStakingSnapshot")
+end = source.index("function hydrateKnownServiceRegistry", start)
+refresh = source[start:end]
+reward_index = refresh.index("await refreshStakingSnapshot()")
+scan_index = refresh.index("fetchObservedClientShares")
+assert reward_index < scan_index, "reward refresh must complete before the large client-share scan starts"
+print("Staking reward/share refresh ordering checks passed")
+PY
+
 staking_page="$(cd "$(dirname "$script")/.." && pwd)/app/staking/page.tsx"
 if grep -Eq 'fetchLivePlans|fetch\(' "$staking_page"; then
   echo "staking page must not contain request-time upstream fetches" >&2

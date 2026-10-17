@@ -63,9 +63,39 @@ assert top5 and all(isinstance(item.get("eligibleSupplierCount"), (int, float)) 
 
 providers = staking_diag.get("providers") or []
 assert staking_diag.get("snapshotSchemaVersion") == 3 and staking_diag.get("persisted") is True, "staking snapshot is not durable schema v3 data"
+expected_provider_ids = {"kleomedes-public", "kalorius-public", "nodefleet-public", "purroofgroup-public", "easy2stake-public"}
+observed_provider_ids = {provider.get("id") for provider in providers}
+assert expected_provider_ids.issubset(observed_provider_ids), f"staking diagnostics are missing providers: {sorted(expected_provider_ids - observed_provider_ids)}"
 assert any(provider.get("valueSource") in ("live-derived", "stale-derived", "provider-lkg") for provider in providers), "staking has no upstream-derived provider row"
 assert any(provider.get("clientShareSource") in ("pocketdex-onchain", "configured-fallback") and provider.get("clientShareStatus") in ("uniform", "variable", "unavailable") for provider in providers), "staking client-share observation provenance is missing"
-assert "Live rewards" in staking or "Stale" in staking, "staking page did not render reward freshness state"
+assert any(label in staking for label in ("Live rewards", "Mixed provider freshness", "Stale provider data", "Provider rewards unavailable")), "staking page did not render reward freshness state"
+
+provider_summary = [
+    {
+        "id": provider.get("id"),
+        "provider": provider.get("provider"),
+        "domain": provider.get("domain"),
+        "rewardDomain": provider.get("rewardDomain"),
+        "status": provider.get("status"),
+        "valueSource": provider.get("valueSource"),
+        "sourceUpdatedAt": provider.get("sourceUpdatedAt"),
+        "fetchedAt": provider.get("fetchedAt"),
+        "clientShareStatus": provider.get("clientShareStatus"),
+        "clientShareSource": provider.get("clientShareSource"),
+        "clientShareObservedAt": provider.get("clientShareObservedAt"),
+        "activeConfigCount": provider.get("activeConfigCount"),
+        "ownerRevShareMatchCount": provider.get("ownerRevShareMatchCount"),
+        "reason": provider.get("reason"),
+    }
+    for provider in providers
+]
+live_derived_providers = sum(provider.get("valueSource") == "live-derived" for provider in providers)
+allow_upstream_degraded = os.environ.get("ALLOW_UPSTREAM_STAKING_DEGRADED") == "true"
+if live_derived_providers == 0 and not allow_upstream_degraded:
+    raise AssertionError(
+        "no live-derived provider economics; set ALLOW_UPSTREAM_STAKING_DEGRADED=true only for an explicitly acknowledged upstream outage: "
+        + json.dumps(provider_summary, sort_keys=True)
+    )
 
 deployed_sha = diagnostics.get("deployedSha")
 if expected_sha and deployed_sha:
@@ -75,7 +105,8 @@ print(json.dumps({
     "deployedSha": deployed_sha,
     "dashboardServices": len(services),
     "eligibleServiceCount": eligible.get("knownServiceCount"),
-    "liveDerivedProviders": sum(provider.get("valueSource") == "live-derived" for provider in providers),
+    "liveDerivedProviders": live_derived_providers,
+    "providers": provider_summary,
     "indexerHeight": indexer.get("highestIngestedHeight")
 }, sort_keys=True))
 PY

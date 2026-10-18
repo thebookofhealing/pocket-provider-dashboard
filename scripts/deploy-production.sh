@@ -79,7 +79,7 @@ make_writable() {
   [[ -d "$1" ]] && chmod -R u+w "$1" || true
 }
 
-for cmd in git node npm pm2 rsync curl readlink realpath python3 mktemp; do
+for cmd in git node npm pm2 rsync curl readlink realpath python3 mktemp ps; do
   require_command "$cmd"
 done
 
@@ -98,10 +98,13 @@ fi
 actual_sha="$(git -C "$SOURCE_ROOT" rev-parse HEAD)"
 [[ "$actual_sha" == "$GITHUB_SHA" ]] || fail "checkout SHA $actual_sha does not match GITHUB_SHA $GITHUB_SHA"
 
+node_version="$(node --version)"
+npm_version="$(npm --version)"
 node_major="$(node -p "Number(process.versions.node.split('.')[0])")"
-if (( node_major < 22 )); then
-  fail "Node.js 22+ is required; found $(node --version)"
+if (( node_major != 24 )); then
+  fail "Node.js 24.x is required; found ${node_version}"
 fi
+log "runtime: Node.js ${node_version}; npm ${npm_version}"
 
 [[ -f "$ENV_FILE" ]] || fail "missing production environment file: $ENV_FILE"
 [[ "$ENV_FILE" = /* ]] || fail "ENV_FILE must be absolute"
@@ -147,6 +150,14 @@ previous_realpath="$(realpath -e "$previous_release")"
 [[ "$previous_realpath" == "$releases_realpath"/* ]] || fail "previous release is outside canonical releases"
 previous_release="$previous_realpath"
 
+rollback_runtime_bin="${ROLLBACK_NODE_RUNTIME_BIN:-}"
+if [[ -z "$rollback_runtime_bin" && -f "$previous_release/.node-runtime" ]]; then
+  rollback_runtime_bin=$(tr -d '[:space:]' < $previous_release/.node-runtime)
+fi
+[[ -n "$rollback_runtime_bin" && -x "$rollback_runtime_bin" ]] || fail "rollback Node runtime is not available; set ROLLBACK_NODE_RUNTIME_BIN or retain a previous release .node-runtime pin"
+rollback_runtime_version=$($rollback_runtime_bin --version)
+log "rollback runtime available: Node.js ${rollback_runtime_version}"
+
 health_before="$(curl --fail --silent --show-error --max-time 15 "$HEALTH_URL" 2>/dev/null || true)"
 indexed_before="$(HEALTH="$health_before" node -e 'try { const h=JSON.parse(process.env.HEALTH); process.stdout.write(String(Number(h.indexer?.highestIngestedHeight ?? 0))); } catch { process.stdout.write("0"); }')"
 indexer_snapshot_before="$(pm2 jlist | node -e 'let s=""; process.stdin.on("data", d => s += d).on("end", () => { const a=JSON.parse(s).find(x => x.name === "pocket-indexer"); process.stdout.write(a ? `${a.pm2_env?.status ?? "unknown"}:${a.pm2_env?.restart_time ?? -1}` : "absent:-1"); });')"
@@ -168,7 +179,7 @@ rollback() {
     if [[ ! -f "$rollback_config" ]]; then
       log "ERROR: no PM2 configuration is available for rollback"
       rollback_failed=1
-    elif ! pm2 startOrReload "$rollback_config" --update-env; then
+    elif ! PATH=$(dirname $rollback_runtime_bin):$PATH NODE_RUNTIME_BIN=$rollback_runtime_bin pm2 startOrReload "$rollback_config" --update-env; then
       rollback_failed=1
     fi
     if ! pm2 save; then rollback_failed=1; fi
@@ -203,9 +214,14 @@ rsync -a --delete \
   --exclude='.env*' \
   "$SOURCE_ROOT/" "$release_dir/"
 
+printf '%s\n' "$(command -v node)" > "$release_dir/.node-runtime"
+
 cd "$release_dir"
 log "installing dependencies"
 env -u NODE_ENV npm ci
+
+log "verifying Node 24 native runtime"
+npm run test:runtime
 
 log "running typecheck"
 NODE_ENV=production POCKET_DB_READONLY=true npm run typecheck
@@ -276,6 +292,7 @@ for _ in $(seq 1 30); do
 done
 
 (( healthy == 1 )) || fail "web/indexer health verification failed"
+node "$CURRENT_LINK/scripts/verify-pm2-runtime.cjs" 24 pocket-dashboard pocket-indexer
 [[ "$snapshot" == online:* ]] || fail "indexer did not remain online"
 (( last_indexed_after >= indexed_before )) || fail "indexer height regressed during deployment"
 log "indexer stable across ${valid_samples} samples; indexed_before=${indexed_before} indexed_after=${first_indexed_after}->${last_indexed_after} restart=${first_restart_after}"

@@ -2,6 +2,9 @@
   "name": "pocket-dashboard",
   "version": "0.0.1",
   "private": true,
+  "engines": {
+    "node": ">=24 <25"
+  },
   "scripts": {
     "dev": "next dev",
     "build": "next build",
@@ -12,12 +15,14 @@
     "indexer:once": "tsx scripts/indexer.ts --once",
     "indexer:backfill": "tsx scripts/indexer.ts --backfill 45d",
     "test:protocol": "bash scripts/test-protocol.sh",
+    "test:node24": "bash scripts/test-node24-migration.sh",
+    "test:runtime": "bash scripts/test-node24-runtime.sh",
     "lint": "next lint",
     "typecheck": "tsc --noEmit -p tsconfig.typecheck.json"
   },
   "dependencies": {
     "@types/ws": "^8.18.1",
-    "better-sqlite3": "11.8.1",
+    "better-sqlite3": "13.0.3",
     "next": "^15.5.18",
     "react": "19.0.0",
     "react-dom": "19.0.0",
@@ -26,7 +31,7 @@
   },
   "devDependencies": {
     "@types/better-sqlite3": "7.6.12",
-    "@types/node": "22.15.3",
+    "@types/node": "24.19.2",
     "@types/react": "19.0.10",
     "@types/react-dom": "19.0.4",
     "typescript": "5.8.3"

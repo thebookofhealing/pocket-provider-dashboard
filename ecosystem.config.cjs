@@ -1,3 +1,4 @@
+const fs = require("node:fs");
 const path = require("node:path");
 const persistentDbPath = process.env.POCKET_SQLITE_PATH?.trim();
 
@@ -12,14 +13,23 @@ const sharedProductionEnv = {
 
 const deployRoot = process.env.DEPLOY_ROOT || "/srv/pocket-provider-dashboard";
 const cwd = `${deployRoot}/current`;
+const runtimeFile = path.join(__dirname, ".node-runtime");
+const pinnedNode = fs.existsSync(runtimeFile)
+  ? fs.readFileSync(runtimeFile, "utf8").trim()
+  : process.env.NODE_RUNTIME_BIN?.trim() || process.execPath;
+
+if (!path.isAbsolute(pinnedNode)) {
+  throw new Error("The PM2 runtime must be an absolute Node.js executable path");
+}
 
 module.exports = {
   apps: [
     {
       name: "pocket-dashboard",
       cwd,
-      script: "npm",
-      args: "run start",
+      script: "node_modules/next/dist/bin/next",
+      args: "start -p 3100",
+      interpreter: pinnedNode,
       autorestart: true,
       restart_delay: 5_000,
       min_uptime: "10s",
@@ -34,8 +44,9 @@ module.exports = {
     {
       name: "pocket-indexer",
       cwd,
-      script: "npm",
-      args: "run indexer",
+      script: "node_modules/tsx/dist/cli.mjs",
+      args: "scripts/indexer.ts --live",
+      interpreter: pinnedNode,
       autorestart: true,
       restart_delay: 5_000,
       min_uptime: "10s",

@@ -33,7 +33,7 @@ Use a dedicated unprivileged account for both the runner and the PM2 processes. 
 
 Install or verify these system tools:
 
-- Node.js 22 or newer
+- Node.js 24.x (the deploy script rejects other major versions)
 - npm
 - git
 - rsync
@@ -69,6 +69,8 @@ Minimum persistence requirement:
 
 ```bash
 POCKET_SQLITE_PATH=/var/lib/pocket-dashboard/pocket.sqlite
+# Keep the prior Node 22 executable available until Node 24 is verified.
+ROLLBACK_NODE_RUNTIME_BIN=/opt/node-v22/bin/node
 ```
 
 Add the production Pocket RPC/indexer configuration required by the environment to the same file. Do not commit secrets or production-only values to Git.
@@ -81,6 +83,8 @@ sudo chmod 0600 /srv/pocket-provider-dashboard/shared/.env.production
 ```
 
 The existing production SQLite database remains at the configured persistent path outside `releases/`. The deployment never copies, replaces, truncates, or moves the canonical database.
+
+`ROLLBACK_NODE_RUNTIME_BIN` is required for the first Node 24 migration when the retained pre-migration release has no `.node-runtime` pin. Later releases carry their own runtime pin. The deploy script validates this rollback executable before creating a new release and uses it when reloading a legacy PM2 configuration.
 
 ## Register the GitHub runner
 
@@ -136,7 +140,7 @@ pm2 status
 Do not merge the deployment workflow until all of these are true:
 
 1. the self-hosted runner is online and Idle
-2. Node.js 22+, npm, PM2, rsync and curl are available to the runner service user
+2. Node.js 24.x, npm, PM2, rsync and curl are available to the runner service user
 3. `/srv/pocket-provider-dashboard/shared/.env.production` exists
 4. `POCKET_SQLITE_PATH` points outside `releases/`
 5. the production DB, if any, is available at that path
@@ -152,7 +156,7 @@ checkout exact commit
     |
 create isolated release
     |
-npm ci
+Node.js 24.x runtime check + npm ci
     |
 npm run typecheck
     |
@@ -182,6 +186,7 @@ curl -fsS http://127.0.0.1:3100/api/health
 pm2 logs pocket-dashboard --lines 100
 pm2 logs pocket-indexer --lines 100
 # confirm both processes are online and indexer height/heartbeat advances
+node /srv/pocket-provider-dashboard/current/scripts/verify-pm2-runtime.cjs 24 pocket-dashboard pocket-indexer
 ```
 
 In GitHub, the `Deploy production` workflow run should finish successfully on runner `pocket-provider-prod-1`.
@@ -197,6 +202,8 @@ The deploy script creates a verified online backup before activation. If the new
 5. marks the GitHub Actions job failed
 
 A build or typecheck failure occurs before activation, so it does not affect the currently running production release.
+
+The release keeps the previous directory and its `ecosystem.config.cjs` intact. The deployment does not replace the system Node installation; keep the previously supported Node 22 runtime available on the VM until the Node 24 release has passed post-deploy verification. If activation or runtime verification fails, the script restores the previous `current` symlink and reloads its PM2 configuration. A manual rollback must use the runtime expected by that retained release.
 
 For a manual rollback, point `current` to a known-good release and reload PM2:
 

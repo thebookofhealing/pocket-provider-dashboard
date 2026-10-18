@@ -52,13 +52,6 @@ export default async function RewardsPage() {
 
   return (
     <main className="page explorer-page">
-      <section className="panel section page-heading rewards-hero-panel">
-        <h1>Provider Rewards Calculator</h1>
-        <p>
-          Leverage historical data to model potential rewards for deploying services on Pocket Network
-        </p>
-      </section>
-
       <RevenueCalculator
         services={calculatorServices}
         suppliersPerSession={data.suppliersPerSession}

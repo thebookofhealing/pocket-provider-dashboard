@@ -1,6 +1,7 @@
 import { derivePlanEconomics, isSourceFresh, normalizeSourceTimestamp } from "@/lib/staking-economics";
 import { getMeta, isDatabaseReadOnly, setMeta } from "@/lib/db";
 import { normalizeProviderDomain, resolveStakingProviderIdentity, STAKING_PROVIDER_IDENTITIES } from "@/lib/staking-provider-identity";
+export { getProviderFreshnessLabel } from "@/lib/staking-freshness";
 
 export const DEFAULT_POKT_PER_SUPPLIER = 59_500;
 export const MINIMUM_DISPLAY_APR = 10;

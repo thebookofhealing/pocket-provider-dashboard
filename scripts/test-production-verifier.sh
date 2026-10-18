@@ -23,6 +23,7 @@ grep -q 'snapshotSchemaVersion") == 3' "$script"
 grep -q 'clientShareSource' "$script"
 bash "$(cd "$(dirname "$script")" && pwd)/test-staking-readiness.sh"
 bash "$(cd "$(dirname "$script")" && pwd)/test-dashboard-readiness.sh"
+python3 "$(cd "$(dirname "$script")" && pwd)/test-production-verifier-behavior.py"
 
 deploy_script="$(cd "$(dirname "$script")" && pwd)/deploy-production.sh"
 grep -q "dashboard_readiness.py" "$deploy_script"
@@ -61,10 +62,40 @@ assert "maybeRefreshStakingSnapshot()" in source[repair_start:repair_end], "repa
 print("Staking/dashboard refresh decoupling checks passed")
 PY
 
+python3 - "$indexer_script" <<'PY'
+import sys
+from pathlib import Path
+source = Path(sys.argv[1]).read_text(encoding="utf-8")
+start = source.index("async function maybeRefreshStakingSnapshot")
+end = source.index("function hydrateKnownServiceRegistry", start)
+refresh = source[start:end]
+reward_index = refresh.index("await refreshStakingSnapshot()")
+scan_index = refresh.index("fetchObservedClientShares")
+assert reward_index < scan_index, "reward refresh must complete before the large client-share scan starts"
+print("Staking reward/share refresh ordering checks passed")
+PY
+
 staking_page="$(cd "$(dirname "$script")/.." && pwd)/app/staking/page.tsx"
 if grep -Eq 'fetchLivePlans|fetch\(' "$staking_page"; then
   echo "staking page must not contain request-time upstream fetches" >&2
   exit 1
 fi
+
+ui_root="$(cd "$(dirname "$script")/.." && pwd)"
+python3 - "$ui_root/app/globals.css" "$ui_root/app/revenue-calculator.tsx" "$ui_root/app/themed-select.tsx" "$ui_root/app/staking/staking-dashboard.tsx" <<'PY'
+import sys
+from pathlib import Path
+
+css = Path(sys.argv[1]).read_text(encoding="utf-8")
+calculator = Path(sys.argv[2]).read_text(encoding="utf-8")
+select = Path(sys.argv[3]).read_text(encoding="utf-8")
+staking = Path(sys.argv[4]).read_text(encoding="utf-8")
+assert ".calculator-assumption-heading" in css and "grid-column: 1 / -1" in css, "calculator heading must span the assumption card"
+assert calculator.count("calculator-assumption-heading") == 1, "calculator assumption must have one full-width heading row"
+assert 'aria-activedescendant={open ? `${listboxId}-option-${activeIndex}` : undefined}' in select, "focused combobox must expose its active descendant"
+assert 'role="listbox"' in select and 'role="option"' in select, "themed select must expose listbox semantics"
+assert 'aria-label={scenario === "migrate" ? "Move suppliers to" : scenario === "new" ? "Public plan" : "Provider plan"}' in staking, "target plan accessible name must match its visible scenario label"
+print("UI layout and accessibility contract checks passed")
+PY
 
 echo "production verifier warm-cache ordering passed"

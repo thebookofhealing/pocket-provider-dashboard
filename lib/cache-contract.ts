@@ -43,6 +43,7 @@ export function hasStructurallyServableDashboard(data: DashboardCacheContract): 
     typeof data.eligibleSupplierSnapshotStale === "boolean" &&
     typeof data.eligibleSupplierSnapshotSource === "string" &&
     data.eligibleSupplierSnapshotSource.length > 0 &&
+    Array.isArray(data.services) &&
     data.services.length > 0 &&
     hasStructurallyCompleteEligibleSupplierCounts(data.services);
 }

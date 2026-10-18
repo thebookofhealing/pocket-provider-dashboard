@@ -110,19 +110,17 @@ export default function RevenueCalculator({ services, suppliersPerSession, sessi
       <div className="calculator-layout">
         <div className="calculator-summary">
           <div className="calculator-assumption panel-inset" style={{ borderRadius: 'var(--radius-lg)', border: '1px solid var(--border)' }}>
+            <div className="calculator-assumption-heading">
+              <span className="hero-highlight-label">Calculator</span>
+              {eligibleCountsReady && <span className="pill supplier-counts-synced" role="status">Supplier Counts Synced</span>}
+            </div>
             <div>
-              <span className="hero-highlight-label">Foundation Support</span>
-             <strong style={{ display: 'block', margin: '8px 0', fontSize: '1.5rem', color: 'var(--accent)' }}>15 Subsidized Suppliers</strong>
               <p style={{ fontSize: '0.9rem' }}>
-                Pocket Network Foundation provides <strong>15 free suppliers</strong> to bootstrap new providers. 
-                Our model assumes <strong>{liveSuppliersPerSession} slots</strong> per session.
+                Pocket Network Foundation provides <strong>15 free suppliers</strong> to bootstrap new providers. Our model assumes each session selects <strong>{liveSuppliersPerSession} suppliers</strong> per session.
                 {!eligibleCountsReady && (
                   <em className="muted" style={{ display: 'block', marginTop: '8px' }}>
                     Current eligible supplier counts are unavailable or stale; selection odds and projected rewards are unavailable until the indexer refreshes them.
                   </em>
-                )}
-                {eligibleCountsReady && (
-                  <span className="pill supplier-counts-synced" role="status">Supplier Counts Synced</span>
                 )}
                 {sessionStale && (
                   <em className="muted" style={{ display: 'block', marginTop: '8px' }}>

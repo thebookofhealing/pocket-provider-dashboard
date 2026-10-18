@@ -316,44 +316,62 @@ const rpcStats = new Map<string, { successes: number; failures: number; timeouts
 let rpcRequestTail = Promise.resolve();
 let knownServiceIds = new Set<string>();
 
+/**
+ * Keep short reward probes ahead of the six-hour client-share scan. The
+ * callback is deliberately started, not awaited, so the scan remains
+ * asynchronous after reward economics have had an uncontended opportunity.
+ */
+export async function runRewardThenStartClientShareScan(
+  refreshRewards: () => Promise<void>,
+  startClientShareScan: () => void,
+  onRewardRefreshError?: (error: unknown) => void
+): Promise<void> {
+  try {
+    await refreshRewards();
+  } catch (error) {
+    onRewardRefreshError?.(error);
+  }
+  startClientShareScan();
+}
+
 async function maybeRefreshStakingSnapshot(force = false): Promise<void> {
   if (!force && Date.now() - lastStakingRefreshAt < STAKING_REFRESH_INTERVAL_MS) return;
   const clientShareRefreshDue = force || isClientShareRefreshDue(Date.now(), lastClientShareRefreshAttemptAt, STAKING_CLIENT_SHARE_REFRESH_INTERVAL_MS);
-  if (clientShareRefreshDue && !clientShareRefreshInFlight) {
-    const pagination = { pageCount: 0, rowCount: 0, startedAt: Date.now() };
-    lastClientShareRefreshAttemptAt = pagination.startedAt;
-    clientShareRefreshInFlight = (async () => {
-      try {
-        const observedShares = await fetchObservedClientShares(pagination);
-        lastClientShareRefreshAt = Date.now();
-        logInfo("Observed PocketDex client shares refreshed", { providerCount: Object.keys(observedShares).length });
-        // Apply the completed observation separately; the 15-minute reward
-        // refresh never waits on this network-wide config scan.
-        await refreshStakingSnapshot(observedShares);
-      } catch (error) {
-        // A partial/failed scan never becomes the new observation. The next
-        // attempt retries from the persisted complete last-known-good state.
-        setIndexerState("staking_client_share_pagination", JSON.stringify({
-          status: "failed",
-          failedAt: new Date().toISOString(),
-          error: error instanceof Error ? error.message : String(error),
-          pageCount: pagination.pageCount,
-          rowCount: pagination.rowCount,
-          durationMs: Date.now() - pagination.startedAt,
-          filter: "canonical provider domains and endpoint URLs"
-        }));
-        logWarn("PocketDex client-share refresh failed; retaining observed LKG", { error: error instanceof Error ? error.message : String(error) });
-      } finally {
-        clientShareRefreshInFlight = null;
-      }
-    })();
-  }
-  try {
-    await refreshStakingSnapshot();
-    lastStakingRefreshAt = Date.now();
-  } catch (error) {
-    logError("Staking snapshot refresh failed", error);
-  }
+  await runRewardThenStartClientShareScan(
+    async () => {
+      await refreshStakingSnapshot();
+      lastStakingRefreshAt = Date.now();
+    },
+    () => {
+      if (!clientShareRefreshDue || clientShareRefreshInFlight) return;
+      const pagination = { pageCount: 0, rowCount: 0, startedAt: Date.now() };
+      lastClientShareRefreshAttemptAt = pagination.startedAt;
+      clientShareRefreshInFlight = (async () => {
+        try {
+          const observedShares = await fetchObservedClientShares(pagination);
+          lastClientShareRefreshAt = Date.now();
+          logInfo("Observed PocketDex client shares refreshed", { providerCount: Object.keys(observedShares).length });
+          // Apply the completed observation separately. A partial/failed scan
+          // never becomes the new observation; it retains the complete LKG.
+          await refreshStakingSnapshot(observedShares);
+        } catch (error) {
+          setIndexerState("staking_client_share_pagination", JSON.stringify({
+            status: "failed",
+            failedAt: new Date().toISOString(),
+            error: error instanceof Error ? error.message : String(error),
+            pageCount: pagination.pageCount,
+            rowCount: pagination.rowCount,
+            durationMs: Date.now() - pagination.startedAt,
+            filter: "canonical provider domains and endpoint URLs"
+          }));
+          logWarn("PocketDex client-share refresh failed; retaining observed LKG", { error: error instanceof Error ? error.message : String(error) });
+        } finally {
+          clientShareRefreshInFlight = null;
+        }
+      })();
+    },
+    (error) => logError("Staking snapshot refresh failed", error)
+  );
 }
 
 function hydrateKnownServiceRegistry(): void {
@@ -1236,11 +1254,11 @@ async function refreshPrice(): Promise<number> {
   return getCachedPrice();
 }
 
-function buildCalendarDailyHistory(
+export function buildCalendarDailyHistory(
   rows: Array<{ day: string; relays: number; estimated_relays?: number; estimated_compute_units?: number; relay_coverage?: number; revenue_upokt: string }>,
-  migrationComplete: boolean
+  migrationComplete: boolean,
+  now = new Date()
 ): Array<{ day: string; relays: number; estimatedRelays?: number; estimatedComputeUnits?: number; isEstimated?: boolean; relayCoverage?: number; revenueUpokt: string; workloadCompleteness: "complete" | "partial" | "missing"; rewardCompleteness: "complete" | "partial" | "missing" }> {
-  const now = new Date();
   const today = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate())).getTime();
   const rowByDay = new Map(rows.map((r) => [r.day, r]));
 

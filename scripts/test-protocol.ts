@@ -10,7 +10,7 @@ import {
 } from "@/lib/opportunities";
 import { derivePlanEconomics, isSourceFresh, normalizeSourceTimestamp } from "@/lib/staking-economics";
 import { isEligibleSupplierSnapshotComplete, isEligibleSupplierSnapshotFresh, isEligibleSupplierSnapshotReusable, parseEligibleSupplierSnapshot, selectEligibleSupplierSnapshot } from "@/lib/eligible-suppliers";
-import { __testing as stakingTesting, deriveObservedClientShares, ensureStakingSnapshotV3, extractLatestBlockTimestamp, getStakingDiagnostics, getStakingPlans, IGNITER_LATEST_BLOCK_QUERY, IGNITER_REWARDS_QUERY, STAKING_SNAPSHOT_SCHEMA_VERSION } from "@/lib/staking-plans";
+import { __testing as stakingTesting, deriveObservedClientShares, ensureStakingSnapshotV3, extractLatestBlockTimestamp, getProviderFreshnessLabel, getStakingDiagnostics, getStakingPlans, IGNITER_LATEST_BLOCK_QUERY, IGNITER_REWARDS_QUERY, STAKING_SNAPSHOT_SCHEMA_VERSION } from "@/lib/staking-plans";
 import { aggregateEligibleSupplierCounts } from "@/lib/eligible-suppliers";
 import { getDeployedSha } from "@/lib/deployment";
 import { resolveEligibleSupplierCounts } from "@/lib/eligible-supplier-source";
@@ -18,7 +18,8 @@ import { buildStakingProjection, getSelectableStakingPlans } from "@/app/staking
 import { __testing as dashboardTesting, getDashboardDataSafe } from "@/lib/pocket";
 import { ELIGIBLE_SUPPLIER_SNAPSHOT_SCHEMA_VERSION, hasCompleteEligibleSupplierCounts, hasStructurallyCompleteEligibleSupplierCounts, hasStructurallyServableDashboard } from "@/lib/cache-contract";
 import { closeDatabaseForTests, getDashboardCache, getMeta, setDashboardCache, setMeta } from "@/lib/db";
-import { advanceObservedSupplierCursor, isClientShareRefreshDue, observedSupplierConfigFilter } from "@/lib/indexer";
+import { advanceObservedSupplierCursor, buildCalendarDailyHistory, isClientShareRefreshDue, observedSupplierConfigFilter, runRewardThenStartClientShareScan } from "@/lib/indexer";
+import { reduceThemedSelectKey, shouldCloseThemedSelectOnPointerDown } from "@/lib/themed-select-state";
 
 assert.equal(getSelectionProbability(40, 1), 100, "all eligible suppliers fit within session slots");
 assert.equal(getSelectionProbability(100, 0), 0, "no entering suppliers has no selection probability");
@@ -32,6 +33,27 @@ assert.match(IGNITER_LATEST_BLOCK_QUERY, /blocks\(orderBy: ID_DESC, first: 1\)/,
 assert.equal(extractLatestBlockTimestamp({ blocks: { nodes: [{ id: "123", timestamp: "1790096400000" }] } }), "2026-09-22T17:00:00.000Z", "latest block timestamp is normalized");
 assert.equal(extractLatestBlockTimestamp({ blocks: { nodes: [{ id: "123", timestamp: "2026-09-23T02:55:27.173" }] } }), "2026-09-23T02:55:27.173Z", "timezone-less Igniter timestamps are treated as UTC");
 assert.equal(getDeployedSha({ GITHUB_SHA: "github-sha-test" }), "github-sha-test", "self-hosted deployment SHA uses GITHUB_SHA");
+
+const selectOptions = [{}, { disabled: true }, {}];
+assert.equal(reduceThemedSelectKey({ key: "ArrowDown", open: false, activeIndex: 0, selectedIndex: 0, options: selectOptions }).activeIndex, 2, "ArrowDown skips disabled options");
+assert.equal(reduceThemedSelectKey({ key: "ArrowUp", open: true, activeIndex: 2, selectedIndex: 2, options: selectOptions }).activeIndex, 0, "ArrowUp moves to the previous enabled option");
+assert.equal(reduceThemedSelectKey({ key: "Enter", open: true, activeIndex: 2, selectedIndex: 0, options: selectOptions }).selectIndex, 2, "Enter selects the active option");
+assert.equal(reduceThemedSelectKey({ key: " ", open: true, activeIndex: 1, selectedIndex: 0, options: selectOptions }).selectIndex, undefined, "Space cannot select a disabled option");
+assert.equal(reduceThemedSelectKey({ key: "Escape", open: true, activeIndex: 2, selectedIndex: 0, options: selectOptions }).open, false, "Escape closes the listbox");
+assert.equal(shouldCloseThemedSelectOnPointerDown(false), true, "click-away closes the themed select");
+assert.equal(shouldCloseThemedSelectOnPointerDown(true), false, "inside clicks keep the themed select open");
+assert.equal(getProviderFreshnessLabel([{ rewardStatus: "live", valueSource: "live-derived" }, { rewardStatus: "live", valueSource: "live-derived" }]), "Live rewards");
+assert.equal(getProviderFreshnessLabel([{ rewardStatus: "live", valueSource: "live-derived" }, { rewardStatus: "stale", valueSource: "provider-lkg" }]), "Mixed provider freshness");
+assert.equal(getProviderFreshnessLabel([{ rewardStatus: "stale", valueSource: "provider-lkg" }]), "Stale provider data");
+assert.equal(getProviderFreshnessLabel([{ rewardStatus: "unavailable", valueSource: "static-cold-start" }]), "Provider rewards unavailable");
+
+const fixedDailyHistory = buildCalendarDailyHistory([
+  { day: "2026-09-30", relays: 30, revenue_upokt: "30" },
+  { day: "2026-10-01", relays: 31, revenue_upokt: "31" }
+], true, new Date("2026-10-02T12:00:00.000Z"));
+assert.equal(fixedDailyHistory.length, 30, "daily history keeps a 30-day completed UTC window");
+assert.deepEqual(fixedDailyHistory.slice(-2).map((row) => row.day), ["2026-09-30", "2026-10-01"], "daily history includes the two most recent completed days");
+assert.equal(fixedDailyHistory.find((row) => row.day === "2026-09-29")?.workloadCompleteness, "missing", "missing daily facts are marked missing rather than current");
 
 const eligiblePages = [
   { supplier: [
@@ -443,6 +465,14 @@ assert.equal(requestPathFetches, 0, "the Staking request path does not invoke ne
 assert.equal(getStakingPlans().plans[0]?.apr, liveSnapshot.plans[0]?.apr, "the request path renders persisted Staking data");
 
 (async () => {
+  const refreshOrder: string[] = [];
+  await runRewardThenStartClientShareScan(
+    async () => { refreshOrder.push("rewards-start"); await Promise.resolve(); refreshOrder.push("rewards-done"); },
+    () => { refreshOrder.push("client-share-start"); },
+    (error) => { throw error; }
+  );
+  assert.deepEqual(refreshOrder, ["rewards-start", "rewards-done", "client-share-start"], "reward refresh completes before client-share scan starts");
+
   stakingTesting.resetLastSuccessfulSnapshot();
   const cacheStart = Date.parse("2026-09-22T12:00:00.000Z");
   const sourceKnownServices = new Set(["bnb", "eth"]);

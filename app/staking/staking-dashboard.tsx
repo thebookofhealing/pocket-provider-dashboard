@@ -2,6 +2,8 @@
 
 import { useMemo, useState } from "react";
 import type { PublicPlan, StakingPlansSnapshot } from "@/lib/staking-plans";
+import { getProviderFreshnessLabel } from "@/lib/staking-freshness";
+import ThemedSelect from "@/app/themed-select";
 
 const POKT_PER_SUPPLIER = 59_500;
 const PROJECTION_MONTHS = 6;
@@ -117,6 +119,9 @@ type StakingDashboardProps = StakingPlansSnapshot;
 
 export default function StakingDashboard({ plans: publicPlans, fetchedAt, sourceUpdatedAt, minimumSupplierStake, stale }: StakingDashboardProps) {
   const PUBLIC_PLANS = publicPlans;
+  const staleProviderCount = PUBLIC_PLANS.filter((plan) => plan.rewardStatus === "stale" || plan.valueSource === "provider-lkg" || plan.valueSource === "stale-derived").length;
+  const unavailableProviderCount = PUBLIC_PLANS.filter((plan) => plan.rewardStatus === "unavailable").length;
+  const providerFreshnessLabel = getProviderFreshnessLabel(PUBLIC_PLANS);
   const selectablePlans = getSelectableStakingPlans(PUBLIC_PLANS);
   const [scenario, setScenario] = useState<Scenario | null>(null);
   const [supplierCount, setSupplierCount] = useState(1);
@@ -224,10 +229,14 @@ export default function StakingDashboard({ plans: publicPlans, fetchedAt, source
           <div>
             <span className="eyebrow eyebrow-ghost">Public plan leaderboard</span>
             <h2 className="section-title">Public provider plans</h2>
-            <p className="section-subtitle">
-              Ranked highest to lowest based on current trailing 7-day APR; ranges rank by their lower bound. <span className={stale ? "staking-feed-status stale" : "staking-feed-status"}>{stale ? "Stale" : "Live rewards"} · fetched {formatFetchedAt(fetchedAt)}{sourceUpdatedAt ? ` · source ${formatFetchedAt(sourceUpdatedAt)}` : ""}</span>
-            </p>
+            <p className="section-subtitle">Ranked highest to lowest based on current trailing 7-day APR; ranges rank by their lower bound.</p>
           </div>
+          <aside className={`staking-feed-meta${stale || staleProviderCount > 0 || unavailableProviderCount > 0 ? " stale" : ""}`} aria-label="Provider plan freshness">
+            <strong>{providerFreshnessLabel}</strong>
+            <span>Checked {formatFetchedAt(fetchedAt)}</span>
+            {sourceUpdatedAt && <span>Source {formatFetchedAt(sourceUpdatedAt)}</span>}
+            {(staleProviderCount > 0 || unavailableProviderCount > 0) && <span>{staleProviderCount} stale · {unavailableProviderCount} unavailable</span>}
+          </aside>
         </div>
 
         <div className="staking-plan-table" role="table" aria-label="Public provider plans">
@@ -296,17 +305,25 @@ export default function StakingDashboard({ plans: publicPlans, fetchedAt, source
           {scenario !== "new" && (
             <label className="staking-input-group">
               <span>Currently staked with</span>
-              <select disabled={!hasScenario} value={currentPlanId} onChange={(event) => setCurrentPlanId(event.target.value)}>
-                {selectablePlans.map((plan) => <option key={plan.id} value={plan.id}>{planLabel(plan)}</option>)}
-              </select>
+              <ThemedSelect
+                disabled={!hasScenario}
+                value={currentPlanId}
+                aria-label="Currently staked with"
+                options={selectablePlans.map((plan) => ({ value: plan.id, label: planLabel(plan) }))}
+                onChange={setCurrentPlanId}
+              />
             </label>
           )}
 
           <label className="staking-input-group">
             <span>{scenario === "migrate" ? "Move suppliers to" : scenario === "new" ? "Public plan" : "Provider plan"}</span>
-            <select disabled={!hasScenario} value={targetPlanId} onChange={(event) => setTargetPlanId(event.target.value)}>
-              {selectablePlans.map((plan) => <option key={plan.id} value={plan.id}>{planLabel(plan)}</option>)}
-            </select>
+              <ThemedSelect
+                disabled={!hasScenario}
+                value={targetPlanId}
+                aria-label={scenario === "migrate" ? "Move suppliers to" : scenario === "new" ? "Public plan" : "Provider plan"}
+                options={selectablePlans.map((plan) => ({ value: plan.id, label: planLabel(plan) }))}
+                onChange={setTargetPlanId}
+              />
           </label>
 
           <div className="staking-input-group staking-supplier-input">
@@ -339,9 +356,9 @@ export default function StakingDashboard({ plans: publicPlans, fetchedAt, source
           <div className="staking-lookback" aria-label="APR lookback: trailing 7 days">
             <div>
               <span>APR lookback</span>
-              <strong>Trailing 7 days · {stale ? "stale source" : "live rewards"}</strong>
+              <strong>Trailing 7 days · {providerFreshnessLabel.toLowerCase()}</strong>
             </div>
-            <span className={`staking-verified-badge ${stale ? "stale" : ""}`}>{stale ? "Stale" : "Live rewards"}</span>
+            <span className={`staking-verified-badge ${providerFreshnessLabel !== "Live rewards" ? "stale" : ""}`}>{providerFreshnessLabel}</span>
           </div>
 
           <div className="staking-method-note">

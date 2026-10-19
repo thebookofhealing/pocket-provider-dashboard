@@ -45,6 +45,10 @@ module.exports = {
       env: {
         ...sharedProductionEnv,
         POCKET_DB_READONLY: "false",
+        // The authenticated Igniter session is an indexer-only secret. It is
+        // never passed to the read-only web process or bundled for clients.
+        IGNITER_TERMS_SESSION_COOKIE: process.env.IGNITER_TERMS_SESSION_COOKIE,
+        IGNITER_TERMS_ENDPOINT_PATH: process.env.IGNITER_TERMS_ENDPOINT_PATH,
       },
     },
   ],

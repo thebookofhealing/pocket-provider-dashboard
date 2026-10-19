@@ -90,11 +90,16 @@ function hasVariableApr(plan: PublicPlan): boolean {
 
 function clientShareMethodology(plan: PublicPlan | undefined): string {
   if (!plan) return "Public-plan terms are unavailable; projections remain disabled until a verified plan term and fresh reward source are available.";
-  return `Advertised public-plan client share is ${plan.clientShare.toFixed(1)}% (${plan.termsSource === "igniter-verified-snapshot" ? "Igniter verified" : "configured terms"}, ${formatTermsVerifiedAt(plan.termsVerifiedAt)}). On-chain revShare observations remain diagnostic and are not substituted into public-plan APR.`;
+  const sourceLabel = plan.termsSource === "igniter-authenticated"
+    ? `Igniter authenticated${plan.termsStale ? " · stale LKG" : ""}`
+    : "Igniter verified bootstrap";
+  return `Advertised public-plan client share is ${plan.clientShare.toFixed(1)}% (${sourceLabel}, ${formatTermsVerifiedAt(plan.termsVerifiedAt)}). On-chain revShare observations remain diagnostic and are not substituted into public-plan APR.`;
 }
 
 function clientShareDisplay(plan: PublicPlan): { value: string; detail: string } {
-  const sourceLabel = plan.termsSource === "igniter-verified-snapshot" ? "Igniter verified" : "Configured terms";
+  const sourceLabel = plan.termsSource === "igniter-authenticated"
+    ? `Igniter authenticated${plan.termsStale ? " · stale LKG" : ""}`
+    : "Igniter verified bootstrap";
   return { value: `${plan.clientShare.toFixed(1)}%`, detail: `${sourceLabel} · ${formatTermsVerifiedAt(plan.termsVerifiedAt)}` };
 }
 

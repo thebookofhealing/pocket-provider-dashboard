@@ -1,6 +1,7 @@
 import { derivePlanEconomics, isSourceFresh, normalizeSourceTimestamp } from "@/lib/staking-economics";
 import { getMeta, isDatabaseReadOnly, setMeta } from "@/lib/db";
 import { normalizeProviderDomain, resolveStakingProviderIdentity, STAKING_PROVIDER_IDENTITIES } from "@/lib/staking-provider-identity";
+import { readIgniterTermsSnapshot, refreshIgniterTermsSnapshot, type IgniterTermsSnapshot } from "@/lib/igniter-terms";
 export { getProviderFreshnessLabel } from "@/lib/staking-freshness";
 
 export const DEFAULT_POKT_PER_SUPPLIER = 59_500;
@@ -26,7 +27,7 @@ export type RewardStatus = "live" | "stale" | "unavailable";
 export type PlanValueSource = "live-derived" | "stale-derived" | "provider-lkg" | "static-cold-start";
 export type ObservedClientShareStatus = "uniform" | "variable" | "unavailable";
 export type ObservedClientShareSource = "pocketdex-onchain" | "configured-fallback";
-export type TermsSource = "igniter-verified-snapshot";
+export type TermsSource = "igniter-verified-snapshot" | "igniter-authenticated";
 
 export type ObservedClientShare = {
   status: ObservedClientShareStatus;
@@ -64,6 +65,11 @@ export type PublicPlan = {
   displayedYieldMin?: number;
   displayedYieldMax?: number;
   termsVerifiedAt: string;
+  termsFetchedAt?: string | null;
+  termsSourceUpdatedAt?: string | null;
+  termsStale?: boolean;
+  planIdentifier?: string | null;
+  termsMappingMethod?: "plan-id" | "provider-plan-name";
   website?: string;
   /** Exact reward-domain alias selected after individual candidate probes. */
   rewardDomain?: string;
@@ -98,6 +104,11 @@ type ProviderPlanMetadata = {
   domain: string;
   rewardDomainCandidates?: string[];
   clientSharesByService?: Record<string, number>;
+  termsFetchedAt?: string | null;
+  termsSourceUpdatedAt?: string | null;
+  termsStale?: boolean;
+  planIdentifier?: string | null;
+  termsMappingMethod?: "plan-id" | "provider-plan-name";
 };
 type IgniterRewardService = {
   gross_rewards?: string | number | null;
@@ -122,8 +133,9 @@ class StakingRefreshError extends Error {
 
 // The public GraphQL schema currently exposes supplier/service configuration
 // and diagnostics, but no durable advertised-plan or address-group identifier.
-// Keep the operator-verified Igniter snapshot explicit and dated until an
-// authoritative unauthenticated terms feed is available. On-chain revShare
+// Keep the operator-verified Igniter snapshot explicit and dated as the safe
+// bootstrap until the authenticated collector has a complete LKG (or Pocket
+// exposes an authoritative unauthenticated terms feed). On-chain revShare
 // observations remain diagnostic evidence and never replace these terms.
 const PLAN_TERMS: Record<string, { plan: string; clientShare: number; termsSource: TermsSource; termsVerifiedAt: string; website: string }> = {
   kleomedes: { plan: "Public", clientShare: 34, termsSource: "igniter-verified-snapshot", termsVerifiedAt: "2026-10-18", website: "https://kleomedes.cloud" },
@@ -146,9 +158,40 @@ const PLAN_METADATA: ProviderPlanMetadata[] = STAKING_PROVIDER_IDENTITIES.map((i
     termsVerifiedAt: terms.termsVerifiedAt,
     domain: identity.domainAliases[0]!,
     rewardDomainCandidates: identity.rewardDomainCandidates,
-    website: terms.website
+    website: terms.website,
+    termsFetchedAt: null,
+    termsSourceUpdatedAt: null,
+    termsStale: false,
+    planIdentifier: null
   };
 });
+
+function metadataForTerms(snapshot: IgniterTermsSnapshot | null): ProviderPlanMetadata[] {
+  if (!snapshot) return PLAN_METADATA;
+  const termsByProvider = new Map(snapshot.plans.map((terms) => [terms.providerId, terms]));
+  return PLAN_METADATA.map((metadata) => {
+    const terms = termsByProvider.get(metadata.identityId ?? "");
+    if (!terms) return metadata;
+    const verifiedAt = (terms.termsSourceUpdatedAt ?? terms.termsFetchedAt).slice(0, 10);
+    return {
+      ...metadata,
+      provider: terms.provider,
+      plan: terms.plan,
+      clientShare: terms.clientShare,
+      termsSource: "igniter-authenticated" as const,
+      termsVerifiedAt: verifiedAt,
+      termsFetchedAt: terms.termsFetchedAt,
+      termsSourceUpdatedAt: terms.termsSourceUpdatedAt,
+      termsStale: snapshot.stale,
+      planIdentifier: terms.planIdentifier,
+      termsMappingMethod: terms.mappingMethod
+    };
+  });
+}
+
+function activePlanMetadata(): ProviderPlanMetadata[] {
+  return metadataForTerms(readIgniterTermsSnapshot());
+}
 
 function configuredClientShareObservation(clientShare: number, observedAt: string | null): ObservedClientShare {
   return { status: "uniform", min: clientShare, max: clientShare, uniformValue: clientShare, source: "configured-fallback", observedAt, activeConfigCount: 0, ownerRevShareMatchCount: 0 };
@@ -299,7 +342,7 @@ function isPublicPlan(value: unknown): value is PublicPlan {
   const plan = value as Partial<PublicPlan>;
   return typeof plan.id === "string" && typeof plan.provider === "string" && typeof plan.plan === "string" &&
     typeof plan.apr === "number" && typeof plan.clientShare === "number" && typeof plan.displayedYield === "number" &&
-    (plan.termsSource === undefined || plan.termsSource === "igniter-verified-snapshot") &&
+    (plan.termsSource === undefined || plan.termsSource === "igniter-verified-snapshot" || plan.termsSource === "igniter-authenticated") &&
     typeof plan.termsVerifiedAt === "string" && typeof plan.fetchedAt === "string" &&
     (plan.rewardStatus === "live" || plan.rewardStatus === "stale" || plan.rewardStatus === "unavailable") &&
     (plan.valueSource === "live-derived" || plan.valueSource === "stale-derived" || plan.valueSource === "provider-lkg" || plan.valueSource === "static-cold-start");
@@ -327,16 +370,26 @@ function parseClientShareObservation(value: unknown, fallbackShare: number, fall
 }
 
 function normalizeSnapshotPlans(snapshot: StakingPlansSnapshot): StakingPlansSnapshot {
+  const currentMetadata = metadataForTerms(readIgniterTermsSnapshot());
   return {
     ...snapshot,
     plans: snapshot.plans.map((plan) => {
-      const metadata = PLAN_METADATA.find((candidate) => candidate.id === plan.id);
+      const metadata = currentMetadata.find((candidate) => candidate.id === plan.id);
       const observation = parseClientShareObservation(plan.clientShareObservation, metadata?.clientShare ?? plan.clientShare, plan.termsVerifiedAt);
       if (!metadata) return { ...plan, clientShareObservation: observation };
 
       const termsChanged = plan.termsSource !== metadata.termsSource || plan.termsVerifiedAt !== metadata.termsVerifiedAt || plan.clientShare !== metadata.clientShare || plan.aprMin != null || plan.aprMax != null;
       if (!termsChanged) {
-        return { ...plan, termsSource: metadata.termsSource, clientShareObservation: observation };
+        return {
+          ...plan,
+          termsSource: metadata.termsSource,
+          termsFetchedAt: metadata.termsFetchedAt,
+          termsSourceUpdatedAt: metadata.termsSourceUpdatedAt,
+          termsStale: metadata.termsStale,
+          planIdentifier: metadata.planIdentifier,
+          termsMappingMethod: metadata.termsMappingMethod,
+          clientShareObservation: observation
+        };
       }
 
       // A persisted v3 snapshot may have been calculated from the old
@@ -350,6 +403,11 @@ function normalizeSnapshotPlans(snapshot: StakingPlansSnapshot): StakingPlansSna
         clientShare: metadata.clientShare,
         termsSource: metadata.termsSource,
         termsVerifiedAt: metadata.termsVerifiedAt,
+        termsFetchedAt: metadata.termsFetchedAt,
+        termsSourceUpdatedAt: metadata.termsSourceUpdatedAt,
+        termsStale: metadata.termsStale,
+        planIdentifier: metadata.planIdentifier,
+        termsMappingMethod: metadata.termsMappingMethod,
         website: metadata.website,
         apr: 0,
         aprMin: undefined,
@@ -471,6 +529,13 @@ export function getStakingDiagnostics(): {
   staticFallbackActive: boolean;
   allocationStatus: "live" | "stale" | "unavailable" | null;
   minimumStakeStatus: "live" | "stale" | "unavailable" | null;
+  terms: {
+    configured: boolean;
+    fetchedAt: string | null;
+    sourceUpdatedAt: string | null;
+    stale: boolean;
+    planCount: number;
+  };
   providers: Array<{
     id: string;
     provider: string;
@@ -482,6 +547,11 @@ export function getStakingDiagnostics(): {
     fetchedAt: string;
     termsSource: TermsSource;
     termsVerifiedAt: string;
+    termsFetchedAt: string | null;
+    termsSourceUpdatedAt: string | null;
+    termsStale: boolean;
+    planIdentifier: string | null;
+    termsMappingMethod: "plan-id" | "provider-plan-name" | null;
     authoritativeClientShare: number;
     clientShareStatus: ObservedClientShareStatus;
     clientShareSource: ObservedClientShareSource;
@@ -494,6 +564,7 @@ export function getStakingDiagnostics(): {
   const persisted = readPersistedStakingSnapshot();
   const currentPersisted = parsePersistedStakingSnapshot(getMeta(STAKING_SNAPSHOT_META_KEY));
   const snapshot = lastServedSnapshot ?? (persisted ? prepareStakingSnapshotForServing(persisted) : null);
+  const termsSnapshot = readIgniterTermsSnapshot();
   return {
     snapshotSchemaVersion: currentPersisted ? STAKING_SNAPSHOT_SCHEMA_VERSION : persisted ? 2 : null,
     persisted: Boolean(persisted),
@@ -504,6 +575,13 @@ export function getStakingDiagnostics(): {
     staticFallbackActive: snapshot?.plans.every((plan) => plan.valueSource === "static-cold-start") ?? true,
     allocationStatus: snapshot?.allocationStatus ?? null,
     minimumStakeStatus: snapshot?.minimumStakeStatus ?? null,
+    terms: {
+      configured: Boolean(process.env.IGNITER_TERMS_SESSION_COOKIE),
+      fetchedAt: termsSnapshot?.fetchedAt ?? null,
+      sourceUpdatedAt: termsSnapshot?.sourceUpdatedAt ?? null,
+      stale: termsSnapshot?.stale ?? true,
+      planCount: termsSnapshot?.plans.length ?? 0
+    },
     providers: (snapshot?.plans ?? []).map((plan) => ({
       id: plan.id,
       provider: plan.provider,
@@ -515,6 +593,11 @@ export function getStakingDiagnostics(): {
       fetchedAt: plan.fetchedAt,
       termsSource: plan.termsSource,
       termsVerifiedAt: plan.termsVerifiedAt,
+      termsFetchedAt: plan.termsFetchedAt ?? null,
+      termsSourceUpdatedAt: plan.termsSourceUpdatedAt ?? null,
+      termsStale: plan.termsStale ?? false,
+      planIdentifier: plan.planIdentifier ?? null,
+      termsMappingMethod: plan.termsMappingMethod ?? null,
       authoritativeClientShare: plan.clientShare,
       clientShareStatus: plan.clientShareObservation.status,
       clientShareSource: plan.clientShareObservation.source,
@@ -789,7 +872,7 @@ function buildPartialPlans(
   };
 }
 
-async function fetchLivePlans(observedShares?: ObservedClientShares): Promise<StakingPlansSnapshot> {
+async function fetchLivePlans(observedShares?: ObservedClientShares, metadata = activePlanMetadata()): Promise<StakingPlansSnapshot> {
   // Interim source hierarchy: the local SQLite index currently stores settlement
   // facts and supplier/domain dimensions, but it does not materialize the
   // provider address-group service configuration plus the historical
@@ -817,8 +900,8 @@ async function fetchLivePlans(observedShares?: ObservedClientShares): Promise<St
   const endTs = new Date(Date.UTC(anchor.getUTCFullYear(), anchor.getUTCMonth(), anchor.getUTCDate(), 23, 59, 59, 999));
   const startTs = new Date(Date.UTC(anchor.getUTCFullYear(), anchor.getUTCMonth(), anchor.getUTCDate() - 6, 0, 0, 0, 0));
   const rewardResults: Array<readonly [string, RewardEntry]> = [];
-  const settledRewards = await Promise.all(PLAN_METADATA.map(async (metadata): Promise<RewardEntry> => {
-    const candidates = metadata.rewardDomainCandidates ?? [metadata.domain];
+  const settledRewards = await Promise.all(metadata.map(async (planMetadata): Promise<RewardEntry> => {
+    const candidates = planMetadata.rewardDomainCandidates ?? [planMetadata.domain];
     const probes = await Promise.allSettled(candidates.map((domain) => fetchGraphQL<{ rewards?: IgniterRewardPayload }>(IGNITER_REWARDS_QUERY, {
       domains: [domain], startTs: startTs.toISOString(), endTs: endTs.toISOString()
     })));
@@ -835,10 +918,10 @@ async function fetchLivePlans(observedShares?: ObservedClientShares): Promise<St
     return chooseRewardDomainProbe(resolvedProbes);
   }));
   settledRewards.forEach((entry, index) => {
-    const metadata = PLAN_METADATA[index];
-    rewardResults.push([metadata.identityId ?? metadata.domain, entry]);
+    const planMetadata = metadata[index];
+    rewardResults.push([planMetadata.identityId ?? planMetadata.domain, entry]);
   });
-  return buildPartialPlans(sourceUpdatedAt, allocationValue, minimumStake, allocationStatus, minimumStakeStatus, new Map(rewardResults), now, PLAN_METADATA, observedShares);
+  return buildPartialPlans(sourceUpdatedAt, allocationValue, minimumStake, allocationStatus, minimumStakeStatus, new Map(rewardResults), now, metadata, observedShares);
 }
 
 async function loadStakingPlans(fetcher: () => Promise<StakingPlansSnapshot> = fetchLivePlans, now = Date.now()): Promise<StakingPlansSnapshot> {
@@ -898,7 +981,11 @@ export async function refreshStakingSnapshot(observedShares?: ObservedClientShar
   if (persisted) rememberSnapshot(persisted);
 
   try {
-    const refreshed = await fetchLivePlans(observedShares);
+    // Terms refresh independently on an eight-hour cadence. A failed or
+    // partial authenticated collection returns the complete terms LKG (marked
+    // stale) and never blocks the short reward refresh.
+    const termsResult = await refreshIgniterTermsSnapshot();
+    const refreshed = await fetchLivePlans(observedShares, metadataForTerms(termsResult.snapshot ?? readIgniterTermsSnapshot()));
     const previous = persisted ?? lastSuccessfulSnapshot;
     const durable = refreshed.plans.some((plan) => plan.rewardStatus !== "unavailable")
       ? refreshed
@@ -927,6 +1014,8 @@ export function getStakingPlans(): StakingPlansSnapshot {
 
 export const __testing = {
   fetchLivePlans,
+  activePlanMetadata,
+  metadataForTerms,
   loadStakingPlans,
   parsePersistedStakingSnapshot,
   prepareStakingSnapshotForServing,
@@ -937,7 +1026,7 @@ export const __testing = {
   buildPartialPlans,
   buildLivePlans,
   chooseRewardDomainProbe,
-  getPlanMetadata: () => PLAN_METADATA.map((metadata) => ({ ...metadata })),
+  getPlanMetadata: () => activePlanMetadata().map((metadata) => ({ ...metadata })),
   resolveStakingProviderIdentity,
   resetLastSuccessfulSnapshot: () => {
     lastSuccessfulSnapshot = null;

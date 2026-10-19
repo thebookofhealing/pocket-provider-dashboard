@@ -73,6 +73,22 @@ POCKET_SQLITE_PATH=/var/lib/pocket-dashboard/pocket.sqlite
 
 Add the production Pocket RPC/indexer configuration required by the environment to the same file. Do not commit secrets or production-only values to Git.
 
+If the authenticated Igniter terms collector is enabled, also place its
+indexer-only session configuration in this VM-local file:
+
+```bash
+IGNITER_TERMS_SESSION_COOKIE=<secret-issued-by-normal-igniter-wallet-login>
+IGNITER_TERMS_ENDPOINT_PATH=/api/terms/public-plans
+```
+
+The cookie must come from a dedicated zero-value Pocket wallet and must never
+be reused from an operator/provider wallet. The PM2 configuration passes these
+values only to `pocket-indexer`; the read-only web process does not receive
+them. The collector sends the cookie only to `https://staking.pocket.network`,
+does not log it, and retains a complete local last-known-good terms snapshot
+when the authenticated response is partial or unavailable. Do not bypass
+CAPTCHA or anti-bot controls while provisioning the session.
+
 Protect it:
 
 ```bash

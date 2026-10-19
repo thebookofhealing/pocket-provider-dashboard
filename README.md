@@ -110,6 +110,25 @@ Optional overrides:
 - `POCKET_LEGACY_RPC_FALLBACK_ENABLED=true` opt-in guard for the old worker's heavy RPC fallback
 - `POCKET_SQLITE_PATH` absolute persistent SQLite path; required in production and shared by the web and indexer processes
 
+### Authenticated Igniter terms collector
+
+The Staking indexer can optionally refresh advertised public-plan terms from a
+structured authenticated Igniter response every eight hours. The current
+collector is deliberately server-side and indexer-only: an operator first
+authenticates a dedicated zero-value Pocket wallet through the normal Igniter
+UI, then provisions the resulting session cookie in the production secret
+store. PocketDash never handles a seed/private key, signs arbitrary requests,
+or persists the cookie in SQLite.
+
+- `IGNITER_TERMS_SESSION_COOKIE` server-side Igniter session cookie (indexer process only)
+- `IGNITER_TERMS_ENDPOINT_PATH` relative path on `https://staking.pocket.network` for the structured authenticated terms response; defaults to `/api/terms/public-plans`
+
+The endpoint must return all five expected public plans (Kleomedes, Easy2stake,
+Kalorius, Nodefleet, and purroofgroup). A partial or invalid response is
+discarded; the previous complete terms snapshot remains in use and is marked
+stale. The web process only reads the resulting local snapshot and never calls
+Igniter or receives the session cookie.
+
 ## Local Development
 
 ```bash

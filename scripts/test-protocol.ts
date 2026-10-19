@@ -20,6 +20,7 @@ import { ELIGIBLE_SUPPLIER_SNAPSHOT_SCHEMA_VERSION, hasCompleteEligibleSupplierC
 import { closeDatabaseForTests, getDashboardCache, getMeta, setDashboardCache, setMeta } from "@/lib/db";
 import { advanceObservedSupplierCursor, buildCalendarDailyHistory, isClientShareRefreshDue, observedSupplierConfigFilter, runRewardThenStartClientShareScan } from "@/lib/indexer";
 import { reduceThemedSelectKey, shouldCloseThemedSelectOnPointerDown } from "@/lib/themed-select-state";
+import { __testing as igniterTermsTesting, IGNITER_TERMS_ATTEMPT_META_KEY, IGNITER_TERMS_META_KEY } from "@/lib/igniter-terms";
 
 assert.equal(getSelectionProbability(40, 1), 100, "all eligible suppliers fit within session slots");
 assert.equal(getSelectionProbability(100, 0), 0, "no entering suppliers has no selection probability");
@@ -257,6 +258,7 @@ assert.deepEqual(
   "all five public-plan client shares match the operator-verified Igniter snapshot"
 );
 assert.ok(verifiedPlanTerms.every((metadata) => metadata.termsSource === "igniter-verified-snapshot" && metadata.termsVerifiedAt === "2026-10-18"), "all public-plan terms retain a dated Igniter provenance");
+
 const liveSnapshot = stakingTesting.buildLivePlans(
   snapshotSource,
   rewardFixture,
@@ -477,6 +479,30 @@ assert.equal(requestPathFetches, 0, "the Staking request path does not invoke ne
 assert.equal(getStakingPlans().plans[0]?.apr, liveSnapshot.plans[0]?.apr, "the request path renders persisted Staking data");
 
 (async () => {
+  const authenticatedTermsFixture = {
+    sourceUpdatedAt: "2026-10-18T08:00:00.000Z",
+    providers: [
+      { identity: "kleomedes", name: "Kleomedes", addressGroups: [{ id: 11, name: "Public", private: false, clientShare: 34, services: ["pocket", "eth"], supplierStats: { suppliers_count: 405, total_staked_tokens: 24_300_000_000_000 } }] },
+      { identity: "easy2stake", name: "Easy2stake", addressGroups: [{ id: 12, name: "igniter-1-eu-a", private: false, clientShare: 50, services: ["pocket"], supplierStats: { suppliers_count: 669, total_staked_tokens: 40_140_000_000_000 } }] },
+      { identity: "kalorius", name: "Kalorius.tech", addressGroups: [{ id: 13, name: "public staking", private: false, clientShare: 20, services: ["pocket"], supplierStats: { suppliers_count: 295, total_staked_tokens: 17_700_000_000_000 } }] },
+      { identity: "nodefleet", name: "Nodefleet", addressGroups: [{ id: 14, name: "Nodefleet-Public", private: false, clientShare: 75, services: ["pocket"], supplierStats: { suppliers_count: 2363, total_staked_tokens: 141_780_000_000_000 } }] },
+      { identity: "purroofgroup", name: "purroofgroup", addressGroups: [{ id: 15, name: "sv1-default", private: false, clientShare: 78, services: ["pocket"], supplierStats: { suppliers_count: 51, total_staked_tokens: 3_060_000_000_000 } }] }
+    ]
+  };
+  setMeta(IGNITER_TERMS_META_KEY, "");
+  setMeta(IGNITER_TERMS_ATTEMPT_META_KEY, "");
+  const authenticatedTerms = igniterTermsTesting.normalizeIgniterTermsPayload(authenticatedTermsFixture, new Date("2026-10-18T08:00:00.000Z"));
+  assert.equal(authenticatedTerms.plans.length, 5, "authenticated Igniter terms require the complete five-provider set");
+  assert.deepEqual(Object.fromEntries(authenticatedTerms.plans.map((plan) => [plan.providerId, plan.clientShare])), { kleomedes: 34, easy2stake: 50, kalorius: 20, nodefleet: 75, purroofgroup: 78 }, "authenticated Igniter terms normalize the advertised client shares");
+  assert.equal(authenticatedTerms.plans.find((plan) => plan.providerId === "kleomedes")?.planIdentifier, "11", "authenticated terms retain the durable address-group identifier");
+  const authenticatedRefresh = await igniterTermsTesting.refreshIgniterTermsSnapshot(async () => authenticatedTermsFixture, new Date("2026-10-18T08:00:00.000Z"));
+  assert.equal(authenticatedRefresh.attempted, true, "configured authenticated terms collection runs on its own cadence");
+  assert.equal(authenticatedRefresh.snapshot?.stale, false, "a complete authenticated terms response is published live");
+  const partialTermsFixture = { ...authenticatedTermsFixture, providers: authenticatedTermsFixture.providers.slice(0, 4) };
+  const failedAuthenticatedRefresh = await igniterTermsTesting.refreshIgniterTermsSnapshot(async () => partialTermsFixture, new Date("2026-10-18T17:00:00.000Z"));
+  assert.equal(failedAuthenticatedRefresh.snapshot?.stale, true, "a partial authenticated terms response is marked stale");
+  assert.equal(igniterTermsTesting.parseSnapshot(getMeta(IGNITER_TERMS_META_KEY))?.plans.length, 5, "partial terms never overwrite the complete authenticated LKG");
+
   const refreshOrder: string[] = [];
   await runRewardThenStartClientShareScan(
     async () => { refreshOrder.push("rewards-start"); await Promise.resolve(); refreshOrder.push("rewards-done"); },

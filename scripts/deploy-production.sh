@@ -82,7 +82,7 @@ make_writable() {
   [[ -d "$1" ]] && chmod -R u+w "$1" || true
 }
 
-for cmd in git node npm pm2 rsync curl readlink realpath python3 mktemp ps; do
+for cmd in git node npm pm2 rsync curl readlink realpath python3 mktemp ps install; do
   require_command "$cmd"
 done
 
@@ -140,6 +140,7 @@ env_realpath="$(realpath -e "$ENV_FILE")"
 [[ "$env_realpath" != "$releases_realpath"/* ]] || fail "environment file resolves inside releases"
 
 mkdir -p "$RELEASES_DIR" "$SHARED_DIR"
+install -m 0750 "$SOURCE_ROOT/scripts/release-runtime.sh" "$SHARED_DIR/release-runtime.sh"
 
 release_id="$GITHUB_SHA"
 release_dir="${RELEASES_DIR}/${release_id}"
@@ -160,9 +161,15 @@ previous_realpath="$(realpath -e "$previous_release")"
 [[ "$previous_realpath" == "$releases_realpath"/* ]] || fail "previous release is outside canonical releases"
 previous_release="$previous_realpath"
 
-rollback_runtime_bin="$(resolve_release_runtime "$previous_release" "${ROLLBACK_NODE_RUNTIME_BIN:-}")" || fail "rollback Node runtime is not available; set ROLLBACK_NODE_RUNTIME_BIN or retain a previous release .node-runtime pin"
+if [[ -f "$previous_release/.node-runtime" ]]; then
+  rollback_runtime_bin="$(resolve_release_runtime "$previous_release")" || fail "previous release .node-runtime pin could not be resolved"
+else
+  [[ -n "${ROLLBACK_NODE_RUNTIME_BIN:-}" ]] || fail "legacy rollback requires ROLLBACK_NODE_RUNTIME_BIN pointing to a retained Node.js 22 runtime"
+  rollback_runtime_bin="$(resolve_release_runtime "$previous_release" "$ROLLBACK_NODE_RUNTIME_BIN")" || fail "legacy rollback runtime could not be resolved"
+  validate_legacy_rollback_runtime "$rollback_runtime_bin" || fail "legacy rollback runtime must be Node.js 22.x with a matching executable companion npm"
+fi
 [[ -n "$rollback_runtime_bin" && -x "$rollback_runtime_bin" ]] || fail "rollback Node runtime is not available; set ROLLBACK_NODE_RUNTIME_BIN or retain a previous release .node-runtime pin"
-rollback_runtime_version=$($rollback_runtime_bin --version)
+rollback_runtime_version="$($rollback_runtime_bin --version)"
 log "rollback runtime available: Node.js ${rollback_runtime_version}"
 
 health_before="$(curl --fail --silent --show-error --max-time 15 "$HEALTH_URL" 2>/dev/null || true)"

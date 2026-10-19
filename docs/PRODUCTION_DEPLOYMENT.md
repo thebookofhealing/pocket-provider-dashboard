@@ -222,16 +222,19 @@ set -a
 set +a
 
 export DEPLOY_ROOT=/srv/pocket-provider-dashboard
-rollback_runtime_bin="${ROLLBACK_NODE_RUNTIME_BIN:-}"
-if [[ -f /srv/pocket-provider-dashboard/current/.node-runtime ]]; then
-  rollback_runtime_bin="$(tr -d '[:space:]' < /srv/pocket-provider-dashboard/current/.node-runtime)"
+runtime_helper=/srv/pocket-provider-dashboard/shared/release-runtime.sh
+test -r "$runtime_helper"
+. "$runtime_helper"
+rollback_runtime_bin="$(resolve_release_runtime /srv/pocket-provider-dashboard/current "${ROLLBACK_NODE_RUNTIME_BIN:-}")"
+if [[ ! -f /srv/pocket-provider-dashboard/current/.node-runtime ]]; then
+  validate_legacy_rollback_runtime "$rollback_runtime_bin"
+else
+  test -x "$rollback_runtime_bin"
 fi
-test -x "$rollback_runtime_bin"
 "$rollback_runtime_bin" --version
 export NODE_RUNTIME_BIN="$rollback_runtime_bin"
 export PATH="$(dirname "$rollback_runtime_bin"):$PATH"
-command -v npm
-npm --version
+"$(dirname "$rollback_runtime_bin")/npm" --version
 pm2 startOrReload /srv/pocket-provider-dashboard/current/ecosystem.config.cjs --update-env
 pm2 save
 

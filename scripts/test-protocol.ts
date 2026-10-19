@@ -244,12 +244,19 @@ const rewardFixture = new Map([[
   [{ gross_rewards: "500000000", staked_suppliers: 2 }]
 ]]);
 const fixtureMetadata = [{
-  id: "fixture", provider: "Fixture", plan: "Public", clientShare: 50,
+  id: "fixture", provider: "Fixture", plan: "Public", clientShare: 50, termsSource: "igniter-verified-snapshot" as const,
   termsVerifiedAt: "2026-09-22", domain: "fixture.example", website: "https://fixture.example"
 }, {
-  id: "fixture-two", provider: "Fixture Two", plan: "Public", clientShare: 60,
+  id: "fixture-two", provider: "Fixture Two", plan: "Public", clientShare: 60, termsSource: "igniter-verified-snapshot" as const,
   termsVerifiedAt: "2026-09-22", domain: "fixture-two.example", website: "https://fixture-two.example"
 }];
+const verifiedPlanTerms = stakingTesting.getPlanMetadata();
+assert.deepEqual(
+  Object.fromEntries(verifiedPlanTerms.map((metadata) => [metadata.identityId, metadata.clientShare])),
+  { kleomedes: 34, kalorius: 20, nodefleet: 75, purroofgroup: 78, easy2stake: 50 },
+  "all five public-plan client shares match the operator-verified Igniter snapshot"
+);
+assert.ok(verifiedPlanTerms.every((metadata) => metadata.termsSource === "igniter-verified-snapshot" && metadata.termsVerifiedAt === "2026-10-18"), "all public-plan terms retain a dated Igniter provenance");
 const liveSnapshot = stakingTesting.buildLivePlans(
   snapshotSource,
   rewardFixture,
@@ -259,6 +266,7 @@ const liveSnapshot = stakingTesting.buildLivePlans(
 );
 assert.equal(liveSnapshot.stale, false, "fresh source is live");
 assert.equal(liveSnapshot.source, "igniter-indexer", "fresh source is marked live");
+assert.equal(liveSnapshot.plans[0]?.termsSource, "igniter-verified-snapshot", "public-plan terms retain explicit provenance");
 assert.equal(liveSnapshot.plans[0]?.termsVerifiedAt, "2026-09-22", "configured terms carry an explicit verification date");
 assert.ok(liveSnapshot.plans.every((plan) => /^\d{4}-\d{2}-\d{2}$/.test(plan.termsVerifiedAt) && Number.isFinite(plan.clientShare)), "configured client-share terms carry a dated, numeric verification record");
 assert.ok(Math.abs((liveSnapshot.plans[0]?.displayedYield ?? 0) - (17 + 1 / 7)) < 1e-9, "Igniter supplier allocation and seven-day divisor are applied once");
@@ -338,24 +346,24 @@ const observedVariable = deriveObservedClientShares([
 assert.equal(observedVariable["fixture.example"]?.status, "variable", "different service shares remain variable");
 assert.equal(observedVariable["fixture.example"]?.uniformValue, null, "variable shares never become a fake uniform value");
 const observedEconomics = stakingTesting.buildLivePlans(snapshotSource, rewardFixture, 59_500, new Date("2026-09-22T12:00:00.000Z"), fixtureMetadata, observedUniform);
-assert.equal(observedEconomics.plans.find((plan) => plan.id === "fixture")?.clientShare, 55, "uniform observed share drives APR economics");
+assert.equal(observedEconomics.plans.find((plan) => plan.id === "fixture")?.clientShare, 50, "verified public-plan terms drive APR economics even when on-chain observations differ");
 assert.equal(observedEconomics.plans.find((plan) => plan.id === "fixture")?.clientShareObservation.source, "pocketdex-onchain", "observed share provenance is persisted");
 assert.equal(observedEconomics.plans.find((plan) => plan.id === "fixture")?.aprMin, undefined, "uniform observed share keeps a single APR");
 const canonicalPlanMetadata = [{ ...fixtureMetadata[0], id: "kleomedes-public", identityId: "kleomedes", domain: "kleomedes.network" }];
 const canonicalPlanRewards = new Map([["kleomedes", rewardFixture.get("fixture.example") ?? []]]);
 const canonicalEconomics = stakingTesting.buildLivePlans(snapshotSource, canonicalPlanRewards, 59_500, new Date("2026-09-22T12:00:00.000Z"), canonicalPlanMetadata, canonicalAliasShares);
-assert.equal(canonicalEconomics.plans[0]?.clientShare, 51, "canonical provider client-share observation feeds the matching public plan across domain aliases");
+assert.equal(canonicalEconomics.plans[0]?.clientShare, 50, "canonical provider observations remain diagnostic while verified terms drive economics");
 const variableEconomics = stakingTesting.buildLivePlans(snapshotSource, rewardFixture, 59_500, new Date("2026-09-22T12:00:00.000Z"), fixtureMetadata, observedVariable);
 assert.equal(variableEconomics.plans.find((plan) => plan.id === "fixture")?.clientShareObservation.status, "variable", "variable observed shares are retained for display");
 const variablePlan = variableEconomics.plans.find((plan) => plan.id === "fixture")!;
-assert.equal(variablePlan.clientShare, variablePlan.clientShareObservation.min, "ranged scalar client share is the observed lower-bound anchor");
-assert.ok((variablePlan.aprMin ?? 0) < (variablePlan.aprMax ?? 0), "variable observed share produces an ordered APR range");
-assert.ok((variablePlan.displayedYieldMin ?? 0) < (variablePlan.displayedYieldMax ?? 0), "variable observed share produces an ordered yield range");
-assert.deepEqual(getSelectableStakingPlans([variablePlan]), [], "variable APR plans are excluded from single-value calculator choices");
-assert.equal(buildStakingProjection(59_500, "new", variablePlan, variablePlan), null, "variable APR plans cannot enter single-value projection math");
+assert.equal(variablePlan.clientShare, 50, "variable provider-wide observations do not override the advertised public-plan term");
+assert.equal(variablePlan.aprMin, undefined, "variable provider-wide observations do not create a public-plan APR range");
+assert.equal(variablePlan.displayedYieldMin, undefined, "variable provider-wide observations do not create a public-plan yield range");
+assert.deepEqual(getSelectableStakingPlans([variablePlan]).map((plan) => plan.id), ["fixture"], "verified public-plan terms remain selectable despite diagnostic revShare variation");
+assert.ok(buildStakingProjection(59_500, "new", variablePlan, variablePlan), "verified public-plan terms remain usable for projection math");
 const parsedVariable = stakingTesting.parsePersistedStakingSnapshot(JSON.stringify({ schemaVersion: STAKING_SNAPSHOT_SCHEMA_VERSION, snapshot: variableEconomics }));
-assert.equal(parsedVariable?.plans.find((plan) => plan.id === "fixture")?.aprMin, variablePlan.aprMin, "variable APR lower bound survives persistence");
-assert.equal(parsedVariable?.plans.find((plan) => plan.id === "fixture")?.aprMax, variablePlan.aprMax, "variable APR upper bound survives persistence");
+assert.equal(parsedVariable?.plans.find((plan) => plan.id === "fixture")?.aprMin, undefined, "public-plan scalar economics survive persistence without an APR range");
+assert.equal(parsedVariable?.plans.find((plan) => plan.id === "fixture")?.termsSource, "igniter-verified-snapshot", "terms provenance survives persistence");
 const noObservationEconomics = stakingTesting.buildLivePlans(snapshotSource, rewardFixture, 59_500, new Date("2026-09-22T12:00:00.000Z"), fixtureMetadata, {});
 assert.equal(noObservationEconomics.plans.find((plan) => plan.id === "fixture")?.clientShareObservation.status, "unavailable", "a missing on-chain observation is explicit");
 assert.equal(noObservationEconomics.plans.find((plan) => plan.id === "fixture")?.clientShare, 50, "configured economics remain an explicitly labeled fallback when observation is unavailable");
@@ -365,8 +373,12 @@ const changedShareSnapshot = stakingTesting.buildLivePlans(
   rewardFixture,
   59_500,
   new Date("2026-09-22T12:00:00.000Z"),
-  [{ ...fixtureMetadata[0], clientShare: 75 }]
+  [{ ...fixtureMetadata[0], clientShare: 75, termsVerifiedAt: "2026-09-23" }]
 );
+assert.equal(changedShareSnapshot.plans[0]?.clientShare, 75, "a newly verified public-plan term replaces the prior client share");
+assert.equal(changedShareSnapshot.plans[0]?.termsSource, "igniter-verified-snapshot", "a live terms change retains its terms provenance");
+assert.equal(changedShareSnapshot.plans[0]?.termsVerifiedAt, "2026-09-23", "a live terms change carries its new verification date");
+assert.equal(changedShareSnapshot.plans[0]?.sourceUpdatedAt, liveSnapshot.sourceUpdatedAt, "a terms change does not rewrite the reward-source timestamp");
 assert.ok(Math.abs((changedShareSnapshot.plans[0]?.displayedYield ?? 0) - (25 + 5 / 7)) < 1e-9, "a refreshed client-share input changes the derived yield");
 
 const staleSourceSnapshot = stakingTesting.buildLivePlans(

@@ -24,7 +24,7 @@ function planLabel(plan: PublicPlan): string {
 }
 
 export function isSelectableStakingPlan(plan: PublicPlan): boolean {
-  return plan.rewardStatus !== "unavailable" && plan.clientShareObservation?.status !== "variable" && plan.aprMin == null && plan.aprMax == null && Number.isFinite(plan.apr) && Number.isFinite(plan.displayedYield);
+  return plan.rewardStatus !== "unavailable" && plan.aprMin == null && plan.aprMax == null && Number.isFinite(plan.apr) && Number.isFinite(plan.displayedYield);
 }
 
 export function getSelectableStakingPlans(plans: PublicPlan[]): PublicPlan[] {
@@ -89,30 +89,13 @@ function hasVariableApr(plan: PublicPlan): boolean {
 }
 
 function clientShareMethodology(plan: PublicPlan | undefined): string {
-  if (!plan) return "No usable on-chain observation is available; APR uses the configured fallback terms dated 2026-09-22.";
-  const observation = plan.clientShareObservation;
-  if (observation.source === "pocketdex-onchain" && observation.status === "uniform") {
-    return "Client share is derived from the current on-chain supplier owner rev-share observed via PocketDex.";
-  }
-  if (observation.source === "pocketdex-onchain" && observation.status === "variable") {
-    return "Observed on-chain client share varies across current supplier configurations. The APR range applies the observed minimum and maximum client shares to the current trailing 7-day reward rate. PocketDash cannot yet determine which configuration corresponds to the advertised public plan.";
-  }
-  return `No usable on-chain observation is available; APR uses the configured fallback of ${plan.clientShare.toFixed(1)}%, terms dated ${formatTermsVerifiedAt(plan.termsVerifiedAt)}.`;
+  if (!plan) return "Public-plan terms are unavailable; projections remain disabled until a verified plan term and fresh reward source are available.";
+  return `Advertised public-plan client share is ${plan.clientShare.toFixed(1)}% (${plan.termsSource === "igniter-verified-snapshot" ? "Igniter verified" : "configured terms"}, ${formatTermsVerifiedAt(plan.termsVerifiedAt)}). On-chain revShare observations remain diagnostic and are not substituted into public-plan APR.`;
 }
 
 function clientShareDisplay(plan: PublicPlan): { value: string; detail: string } {
-  const observation = plan.clientShareObservation;
-  const observedAt = observation?.observedAt ? ` · observed ${formatFetchedAt(observation.observedAt)}` : "";
-  if (observation?.source === "pocketdex-onchain") {
-    if (observation.status === "uniform" && observation.uniformValue != null) {
-      return { value: `${observation.uniformValue.toFixed(1)}%`, detail: `On-chain observed${observedAt}` };
-    }
-    if (observation.status === "variable" && observation.min != null && observation.max != null) {
-      return { value: `${observation.min.toFixed(1)}–${observation.max.toFixed(1)}%`, detail: `Varies by service · On-chain observed${observedAt}` };
-    }
-    return { value: "Unavailable", detail: `Configured fallback · terms dated ${formatTermsVerifiedAt(plan.termsVerifiedAt)}` };
-  }
-  return { value: `${plan.clientShare.toFixed(1)}%`, detail: `Configured fallback · terms dated ${formatTermsVerifiedAt(plan.termsVerifiedAt)}` };
+  const sourceLabel = plan.termsSource === "igniter-verified-snapshot" ? "Igniter verified" : "Configured terms";
+  return { value: `${plan.clientShare.toFixed(1)}%`, detail: `${sourceLabel} · ${formatTermsVerifiedAt(plan.termsVerifiedAt)}` };
 }
 
 type StakingDashboardProps = StakingPlansSnapshot;

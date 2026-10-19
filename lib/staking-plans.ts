@@ -26,6 +26,7 @@ export type RewardStatus = "live" | "stale" | "unavailable";
 export type PlanValueSource = "live-derived" | "stale-derived" | "provider-lkg" | "static-cold-start";
 export type ObservedClientShareStatus = "uniform" | "variable" | "unavailable";
 export type ObservedClientShareSource = "pocketdex-onchain" | "configured-fallback";
+export type TermsSource = "igniter-verified-snapshot";
 
 export type ObservedClientShare = {
   status: ObservedClientShareStatus;
@@ -58,6 +59,7 @@ export type PublicPlan = {
   aprMin?: number;
   aprMax?: number;
   clientShare: number;
+  termsSource: TermsSource;
   displayedYield: number;
   displayedYieldMin?: number;
   displayedYieldMax?: number;
@@ -90,6 +92,7 @@ type ProviderPlanMetadata = {
   provider: string;
   plan: string;
   clientShare: number;
+  termsSource: TermsSource;
   termsVerifiedAt: string;
   website?: string;
   domain: string;
@@ -117,15 +120,17 @@ class StakingRefreshError extends Error {
   }
 }
 
-// Igniter's public UI does not expose an unauthenticated plan-status endpoint.
-// Keep plan terms explicit, but source reward economics and the protocol minimum
-// stake from the same public Pocket services used by Igniter.
-const PLAN_TERMS: Record<string, { plan: string; clientShare: number; termsVerifiedAt: string; website: string }> = {
-  kleomedes: { plan: "Public", clientShare: 49, termsVerifiedAt: "2026-09-22", website: "https://kleomedes.cloud" },
-  kalorius: { plan: "public staking", clientShare: 20, termsVerifiedAt: "2026-09-22", website: "https://kalorius.tech/" },
-  nodefleet: { plan: "Nodefleet-Public", clientShare: 75, termsVerifiedAt: "2026-09-22", website: "https://nodefleet.org/" },
-  purroofgroup: { plan: "sv1-default", clientShare: 78, termsVerifiedAt: "2026-09-22", website: "https://www.purroofgroup.com/" },
-  easy2stake: { plan: "igniter-1-eu-a", clientShare: 50, termsVerifiedAt: "2026-09-22", website: "https://www.easy2stake.com/" }
+// The public GraphQL schema currently exposes supplier/service configuration
+// and diagnostics, but no durable advertised-plan or address-group identifier.
+// Keep the operator-verified Igniter snapshot explicit and dated until an
+// authoritative unauthenticated terms feed is available. On-chain revShare
+// observations remain diagnostic evidence and never replace these terms.
+const PLAN_TERMS: Record<string, { plan: string; clientShare: number; termsSource: TermsSource; termsVerifiedAt: string; website: string }> = {
+  kleomedes: { plan: "Public", clientShare: 34, termsSource: "igniter-verified-snapshot", termsVerifiedAt: "2026-10-18", website: "https://kleomedes.cloud" },
+  kalorius: { plan: "public staking", clientShare: 20, termsSource: "igniter-verified-snapshot", termsVerifiedAt: "2026-10-18", website: "https://kalorius.tech/" },
+  nodefleet: { plan: "Nodefleet-Public", clientShare: 75, termsSource: "igniter-verified-snapshot", termsVerifiedAt: "2026-10-18", website: "https://nodefleet.org/" },
+  purroofgroup: { plan: "sv1-default", clientShare: 78, termsSource: "igniter-verified-snapshot", termsVerifiedAt: "2026-10-18", website: "https://www.purroofgroup.com/" },
+  easy2stake: { plan: "igniter-1-eu-a", clientShare: 50, termsSource: "igniter-verified-snapshot", termsVerifiedAt: "2026-10-18", website: "https://www.easy2stake.com/" }
 };
 
 const PLAN_METADATA: ProviderPlanMetadata[] = STAKING_PROVIDER_IDENTITIES.map((identity) => {
@@ -137,6 +142,7 @@ const PLAN_METADATA: ProviderPlanMetadata[] = STAKING_PROVIDER_IDENTITIES.map((i
     provider: identity.provider,
     plan: terms.plan,
     clientShare: terms.clientShare,
+    termsSource: terms.termsSource,
     termsVerifiedAt: terms.termsVerifiedAt,
     domain: identity.domainAliases[0]!,
     rewardDomainCandidates: identity.rewardDomainCandidates,
@@ -225,14 +231,14 @@ function getPlanDomain(planId: string): string | null {
 }
 
 const LAST_KNOWN_GOOD = [
-  { ...PLAN_METADATA[0], apr: 65.3, displayedYield: 107.32 },
-  { ...PLAN_METADATA[1], apr: 40.7, displayedYield: 66.95 },
-  { ...PLAN_METADATA[2], apr: 28.4, displayedYield: 46.64 },
-  { ...PLAN_METADATA[3], apr: 18.8, displayedYield: 30.92 },
-  { ...PLAN_METADATA[4], apr: 13.5, displayedYield: 22.19 }
+  { ...PLAN_METADATA[0], apr: 42.0, displayedYield: 69.00 },
+  { ...PLAN_METADATA[1], apr: 30.1, displayedYield: 49.54 },
+  { ...PLAN_METADATA[2], apr: 28.2, displayedYield: 46.33 },
+  { ...PLAN_METADATA[3], apr: 10.1, displayedYield: 16.68 },
+  { ...PLAN_METADATA[4], apr: 7.1, displayedYield: 11.69 }
 ].map(({ domain: _domain, identityId: _identityId, rewardDomainCandidates: _rewardDomainCandidates, ...plan }) => ({
   ...plan,
-  clientShareObservation: configuredClientShareObservation(plan.clientShare, "2026-09-22T00:00:00.000Z"),
+  clientShareObservation: configuredClientShareObservation(plan.clientShare, "2026-10-18T00:00:00.000Z"),
   rewardStatus: "unavailable" as const,
   valueSource: "static-cold-start" as const,
   sourceUpdatedAt: null,
@@ -293,6 +299,7 @@ function isPublicPlan(value: unknown): value is PublicPlan {
   const plan = value as Partial<PublicPlan>;
   return typeof plan.id === "string" && typeof plan.provider === "string" && typeof plan.plan === "string" &&
     typeof plan.apr === "number" && typeof plan.clientShare === "number" && typeof plan.displayedYield === "number" &&
+    (plan.termsSource === undefined || plan.termsSource === "igniter-verified-snapshot") &&
     typeof plan.termsVerifiedAt === "string" && typeof plan.fetchedAt === "string" &&
     (plan.rewardStatus === "live" || plan.rewardStatus === "stale" || plan.rewardStatus === "unavailable") &&
     (plan.valueSource === "live-derived" || plan.valueSource === "stale-derived" || plan.valueSource === "provider-lkg" || plan.valueSource === "static-cold-start");
@@ -322,10 +329,40 @@ function parseClientShareObservation(value: unknown, fallbackShare: number, fall
 function normalizeSnapshotPlans(snapshot: StakingPlansSnapshot): StakingPlansSnapshot {
   return {
     ...snapshot,
-    plans: snapshot.plans.map((plan) => ({
-      ...plan,
-      clientShareObservation: parseClientShareObservation(plan.clientShareObservation, plan.clientShare, plan.termsVerifiedAt)
-    }))
+    plans: snapshot.plans.map((plan) => {
+      const metadata = PLAN_METADATA.find((candidate) => candidate.id === plan.id);
+      const observation = parseClientShareObservation(plan.clientShareObservation, metadata?.clientShare ?? plan.clientShare, plan.termsVerifiedAt);
+      if (!metadata) return { ...plan, clientShareObservation: observation };
+
+      const termsChanged = plan.termsSource !== metadata.termsSource || plan.termsVerifiedAt !== metadata.termsVerifiedAt || plan.clientShare !== metadata.clientShare || plan.aprMin != null || plan.aprMax != null;
+      if (!termsChanged) {
+        return { ...plan, termsSource: metadata.termsSource, clientShareObservation: observation };
+      }
+
+      // A persisted v3 snapshot may have been calculated from the old
+      // provider-wide revShare range. Do not serve those economics under the
+      // corrected public-plan terms; retain the row for visibility and let the
+      // next background refresh repopulate reward-derived values.
+      return {
+        ...plan,
+        provider: metadata.provider,
+        plan: metadata.plan,
+        clientShare: metadata.clientShare,
+        termsSource: metadata.termsSource,
+        termsVerifiedAt: metadata.termsVerifiedAt,
+        website: metadata.website,
+        apr: 0,
+        aprMin: undefined,
+        aprMax: undefined,
+        displayedYield: 0,
+        displayedYieldMin: undefined,
+        displayedYieldMax: undefined,
+        rewardStatus: "unavailable" as const,
+        valueSource: "static-cold-start" as const,
+        clientShareObservation: observation,
+        diagnosticReason: "persisted economics predate the verified public-plan terms; awaiting a live reward refresh"
+      };
+    })
   };
 }
 
@@ -443,6 +480,9 @@ export function getStakingDiagnostics(): {
     valueSource: PlanValueSource;
     sourceUpdatedAt: string | null;
     fetchedAt: string;
+    termsSource: TermsSource;
+    termsVerifiedAt: string;
+    authoritativeClientShare: number;
     clientShareStatus: ObservedClientShareStatus;
     clientShareSource: ObservedClientShareSource;
     clientShareObservedAt: string | null;
@@ -473,6 +513,9 @@ export function getStakingDiagnostics(): {
       valueSource: plan.valueSource,
       sourceUpdatedAt: plan.sourceUpdatedAt,
       fetchedAt: plan.fetchedAt,
+      termsSource: plan.termsSource,
+      termsVerifiedAt: plan.termsVerifiedAt,
+      authoritativeClientShare: plan.clientShare,
       clientShareStatus: plan.clientShareObservation.status,
       clientShareSource: plan.clientShareObservation.source,
       clientShareObservedAt: plan.clientShareObservation.observedAt,
@@ -524,21 +567,12 @@ type DerivedPlanEconomics = {
 function deriveClientShareEconomics(
   grossSevenDayPerSupplierUpokt: number,
   metadata: ProviderPlanMetadata,
-  observation: ObservedClientShare,
+  _observation: ObservedClientShare,
   minimumStake: number
 ): DerivedPlanEconomics | null {
-  if (observation.source === "pocketdex-onchain" && observation.status === "uniform" && observation.uniformValue != null) {
-    return { clientShare: observation.uniformValue, economics: derivePlanEconomics(grossSevenDayPerSupplierUpokt, observation.uniformValue, minimumStake) };
-  }
-  if (observation.source === "pocketdex-onchain" && observation.status === "variable" && observation.min != null && observation.max != null) {
-    // Reward responses currently lack stable service IDs, so use the observed
-    // provider-wide min/max as an explicit envelope rather than averaging shares.
-    const min = derivePlanEconomics(grossSevenDayPerSupplierUpokt, observation.min, minimumStake);
-    const max = derivePlanEconomics(grossSevenDayPerSupplierUpokt, observation.max, minimumStake);
-    // The scalar fields are the conservative lower-bound anchor whenever the
-    // persisted plan also carries an observed range.
-    return { clientShare: observation.min, economics: min, range: { min, max } };
-  }
+  // Supplier/service revShare is retained as mapping evidence only. It can
+  // contain multiple public/private cohorts and must never become a public
+  // plan APR range or override the verified advertised term.
   const configuredShare = getUniformClientShare(metadata);
   return configuredShare == null ? null : { clientShare: configuredShare, economics: derivePlanEconomics(grossSevenDayPerSupplierUpokt, configuredShare, minimumStake) };
 }
@@ -903,6 +937,7 @@ export const __testing = {
   buildPartialPlans,
   buildLivePlans,
   chooseRewardDomainProbe,
+  getPlanMetadata: () => PLAN_METADATA.map((metadata) => ({ ...metadata })),
   resolveStakingProviderIdentity,
   resetLastSuccessfulSnapshot: () => {
     lastSuccessfulSnapshot = null;

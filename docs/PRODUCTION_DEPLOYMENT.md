@@ -69,6 +69,7 @@ Minimum persistence requirement:
 
 ```bash
 POCKET_SQLITE_PATH=/var/lib/pocket-dashboard/pocket.sqlite
+NODE_RUNTIME_BIN=/opt/node-v24/bin/node
 # Keep the prior Node 22 executable available until Node 24 is verified.
 ROLLBACK_NODE_RUNTIME_BIN=/opt/node-v22/bin/node
 ```
@@ -85,6 +86,8 @@ sudo chmod 0600 /srv/pocket-provider-dashboard/shared/.env.production
 The existing production SQLite database remains at the configured persistent path outside `releases/`. The deployment never copies, replaces, truncates, or moves the canonical database.
 
 `ROLLBACK_NODE_RUNTIME_BIN` is required for the first Node 24 migration when the retained pre-migration release has no `.node-runtime` pin. Later releases carry their own runtime pin. The deploy script validates this rollback executable before creating a new release and uses it when reloading a legacy PM2 configuration.
+
+`NODE_RUNTIME_BIN` must point to a stable VM-local Node 24 executable. It must not point into the GitHub Actions tool cache. `actions/setup-node` remains the build/test runtime only; PM2 and reboot resurrection use the release's stable `.node-runtime` pin.
 
 ## Register the GitHub runner
 
@@ -219,6 +222,16 @@ set -a
 set +a
 
 export DEPLOY_ROOT=/srv/pocket-provider-dashboard
+rollback_runtime_bin="${ROLLBACK_NODE_RUNTIME_BIN:-}"
+if [[ -f /srv/pocket-provider-dashboard/current/.node-runtime ]]; then
+  rollback_runtime_bin="$(tr -d '[:space:]' < /srv/pocket-provider-dashboard/current/.node-runtime)"
+fi
+test -x "$rollback_runtime_bin"
+"$rollback_runtime_bin" --version
+export NODE_RUNTIME_BIN="$rollback_runtime_bin"
+export PATH="$(dirname "$rollback_runtime_bin"):$PATH"
+command -v npm
+npm --version
 pm2 startOrReload /srv/pocket-provider-dashboard/current/ecosystem.config.cjs --update-env
 pm2 save
 

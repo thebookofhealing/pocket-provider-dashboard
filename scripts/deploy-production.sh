@@ -8,6 +8,9 @@ ENV_FILE="${ENV_FILE:-}"
 KEEP_RELEASES="${KEEP_RELEASES:-5}"
 HEALTH_URL="${HEALTH_URL:-http://127.0.0.1:3100/api/health}"
 
+# shellcheck disable=SC1091
+. "$SOURCE_ROOT/scripts/release-runtime.sh"
+
 [[ "$DEPLOY_ROOT" = /* ]] || { printf '[deploy] ERROR: DEPLOY_ROOT must be absolute\n' >&2; exit 1; }
 
 set_paths() {
@@ -110,6 +113,13 @@ log "runtime: Node.js ${node_version}; npm ${npm_version}"
 [[ "$ENV_FILE" = /* ]] || fail "ENV_FILE must be absolute"
 load_runtime_env
 
+[[ -n "${NODE_RUNTIME_BIN:-}" ]] || fail "NODE_RUNTIME_BIN must be set to the stable VM-local Node 24 executable in $ENV_FILE"
+[[ "$NODE_RUNTIME_BIN" = /* && -x "$NODE_RUNTIME_BIN" ]] || fail "NODE_RUNTIME_BIN must be an absolute executable path"
+production_runtime_version="$($NODE_RUNTIME_BIN --version)"
+production_runtime_major="$($NODE_RUNTIME_BIN -p "Number(process.versions.node.split('.')[0])")"
+(( production_runtime_major == 24 )) || fail "NODE_RUNTIME_BIN must point to Node.js 24.x; found ${production_runtime_version}"
+log "production runtime: Node.js ${production_runtime_version} (${NODE_RUNTIME_BIN})"
+
 [[ -n "${POCKET_SQLITE_PATH:-}" ]] || fail "POCKET_SQLITE_PATH must be set in $ENV_FILE"
 [[ "$POCKET_SQLITE_PATH" = /* ]] || fail "POCKET_SQLITE_PATH must be absolute"
 [[ "$POCKET_SQLITE_PATH" != "$RELEASES_DIR"/* ]] || fail "POCKET_SQLITE_PATH must be outside releases"
@@ -150,10 +160,7 @@ previous_realpath="$(realpath -e "$previous_release")"
 [[ "$previous_realpath" == "$releases_realpath"/* ]] || fail "previous release is outside canonical releases"
 previous_release="$previous_realpath"
 
-rollback_runtime_bin="${ROLLBACK_NODE_RUNTIME_BIN:-}"
-if [[ -z "$rollback_runtime_bin" && -f "$previous_release/.node-runtime" ]]; then
-  rollback_runtime_bin=$(tr -d '[:space:]' < $previous_release/.node-runtime)
-fi
+rollback_runtime_bin="$(resolve_release_runtime "$previous_release" "${ROLLBACK_NODE_RUNTIME_BIN:-}")" || fail "rollback Node runtime is not available; set ROLLBACK_NODE_RUNTIME_BIN or retain a previous release .node-runtime pin"
 [[ -n "$rollback_runtime_bin" && -x "$rollback_runtime_bin" ]] || fail "rollback Node runtime is not available; set ROLLBACK_NODE_RUNTIME_BIN or retain a previous release .node-runtime pin"
 rollback_runtime_version=$($rollback_runtime_bin --version)
 log "rollback runtime available: Node.js ${rollback_runtime_version}"
@@ -214,7 +221,7 @@ rsync -a --delete \
   --exclude='.env*' \
   "$SOURCE_ROOT/" "$release_dir/"
 
-printf '%s\n' "$(command -v node)" > "$release_dir/.node-runtime"
+printf '%s\n' "$NODE_RUNTIME_BIN" > "$release_dir/.node-runtime"
 
 cd "$release_dir"
 log "installing dependencies"

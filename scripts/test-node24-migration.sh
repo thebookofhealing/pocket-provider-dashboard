@@ -35,6 +35,8 @@ PY
 
 grep -q 'node_major != 24' "$deploy"
 grep -q 'Node.js 24.x is required' "$deploy"
+grep -q 'NODE_RUNTIME_BIN must be set' "$deploy"
+grep -q 'production_runtime_major' "$deploy"
 grep -q 'npm run test:runtime' "$deploy"
 grep -q 'verify-pm2-runtime.cjs" 24 pocket-dashboard pocket-indexer' "$deploy"
 grep -q 'rollback_runtime_bin' "$deploy"
@@ -43,5 +45,6 @@ grep -q 'interpreter: pinnedNode' "$ecosystem"
 grep -q 'node_modules/next/dist/bin/next' "$ecosystem"
 grep -q 'node_modules/tsx/dist/cli.mjs' "$ecosystem"
 grep -q 'better-sqlite3 Node 24 native smoke test passed' "$root/scripts/test-node24-runtime.cjs"
+bash "$root/scripts/test-release-runtime.sh"
 
 echo "Node 24 workflow/deploy contract checks passed"
